@@ -36,7 +36,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v9
+      # 이동식 메이저 태그는 v7까지만 발행돼 있어 릴리스 태그로 고정한다.
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
 
