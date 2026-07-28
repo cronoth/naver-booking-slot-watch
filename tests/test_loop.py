@@ -280,6 +280,40 @@ def test_state_is_saved_even_when_nothing_is_active(tmp_path: Path) -> None:
 
 
 @responses.activate
+def test_unchanged_state_is_not_rewritten_across_runs(tmp_path: Path) -> None:
+    """변화가 없으면 파일을 다시 쓰지 않는다. Actions가 빈 커밋을 쌓지 않게 하는 조건."""
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(0))
+    config = write_config(tmp_path)
+    path = tmp_path / "state.json"
+
+    run(config, tmp_path, clock=FakeClock(START), settings=settings(80))
+    after_first = path.read_text(encoding="utf-8")
+
+    later = FakeClock(START + timedelta(hours=6))
+    run(config, tmp_path, clock=later, settings=settings(80), state=load_state(path))
+
+    assert path.read_text(encoding="utf-8") == after_first
+
+
+@responses.activate
+def test_changed_remaining_is_written(tmp_path: Path) -> None:
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(0))
+    config = write_config(tmp_path)
+    path = tmp_path / "state.json"
+    run(config, tmp_path, clock=FakeClock(START), settings=settings(80))
+    after_first = path.read_text(encoding="utf-8")
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    later = FakeClock(START + timedelta(hours=6))
+    run(config, tmp_path, clock=later, settings=settings(80), state=load_state(path))
+
+    assert path.read_text(encoding="utf-8") != after_first
+    assert load_state(path).slots["event:2026-08-29:14:30"].status == "available"
+
+
+@responses.activate
 def test_repeated_failures_do_not_stop_the_loop(tmp_path: Path) -> None:
     responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
     responses.add(responses.POST, NTFY_URL, json={})

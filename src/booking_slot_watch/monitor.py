@@ -317,8 +317,13 @@ def run_loop(
             break
         _sleep_in_steps(min(next_interval(settings, random_fn), remaining), sleep_fn, should_stop)
 
-    save_state(state_path, state, now_fn())
-    logger.info("루프 종료: iterations=%d reason=%s", iterations, reason)
+    written = save_state(state_path, state, now_fn())
+    logger.info(
+        "루프 종료: iterations=%d reason=%s state=%s",
+        iterations,
+        reason,
+        "saved" if written else "unchanged",
+    )
     return LoopResult(iterations=iterations, stopped_reason=reason)
 
 

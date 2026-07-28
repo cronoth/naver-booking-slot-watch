@@ -196,8 +196,13 @@ def load_state(path: Path) -> State:
     )
 
 
-def save_state(path: Path, state: State, updated_at: datetime) -> None:
-    """임시 파일에 쓴 뒤 `os.replace`로 원자적으로 교체한다."""
+def save_state(path: Path, state: State, updated_at: datetime) -> bool:
+    """임시 파일에 쓴 뒤 `os.replace`로 원자적으로 교체한다.
+
+    실질 상태가 그대로면 쓰지 않고 `False`를 돌려준다. `updated_at`과
+    `last_checked_at`은 조회마다 바뀌므로, 그대로 저장하면 파일이 늘 달라
+    보여서 Actions가 변화 없는 커밋을 계속 쌓는다.
+    """
     payload = {
         "version": STATE_VERSION,
         "updated_at": updated_at.isoformat(),
@@ -208,6 +213,9 @@ def save_state(path: Path, state: State, updated_at: datetime) -> None:
             )
         },
     }
+    if _material(payload) == _material(_read_existing(path)):
+        return False
+
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
     try:
@@ -228,6 +236,33 @@ def save_state(path: Path, state: State, updated_at: datetime) -> None:
             raise
     except OSError as exc:
         raise StateError(f"상태 파일을 쓸 수 없다: {path} ({exc})") from exc
+    return True
+
+
+#: 조회마다 바뀌어서 "변화 있음" 판단에 넣으면 안 되는 필드.
+_VOLATILE_SLOT_FIELDS = frozenset({"last_checked_at"})
+
+
+def _material(payload: Any) -> Any:
+    """변화 판단에 쓸 부분만 남긴다. 읽을 수 없는 파일은 `None`이 되어 항상 다르다."""
+    if not isinstance(payload, dict):
+        return None
+    raw_slots = payload.get("slots")
+    slots: dict[str, Any] = {}
+    if isinstance(raw_slots, dict):
+        for key, slot in raw_slots.items():
+            if isinstance(slot, dict):
+                slots[key] = {k: v for k, v in slot.items() if k not in _VOLATILE_SLOT_FIELDS}
+            else:
+                slots[key] = slot
+    return {"slots": slots, "heartbeat": payload.get("heartbeat")}
+
+
+def _read_existing(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _dump_slot_state(slot: SlotState) -> dict[str, Any]:

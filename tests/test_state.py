@@ -191,6 +191,90 @@ def test_failed_save_keeps_the_previous_file_intact(
     assert [p.name for p in path.parent.iterdir()] == [path.name]
 
 
+# --- 변화 없으면 다시 쓰지 않는다 -----------------------------------------
+#
+# updated_at과 last_checked_at은 매 조회마다 바뀐다. 그대로 저장하면 파일이
+# 항상 달라 보여서 Actions가 변화 없는 커밋을 5.4시간마다 계속 쌓는다.
+
+
+def saved_once(tmp_path: Path) -> tuple[Path, State, str]:
+    path = state_path(tmp_path)
+    state = State(
+        slots={"k": record_success(None, remaining=0, threshold=1, checked_at=T0)},
+        heartbeat_last_sent=date(2026, 7, 28),
+    )
+    assert save_state(path, state, T0) is True
+    return path, state, path.read_text(encoding="utf-8")
+
+
+def test_save_reports_whether_it_wrote(tmp_path: Path) -> None:
+    path, state, _ = saved_once(tmp_path)
+    assert save_state(path, state, T2) is False
+
+
+def test_save_skips_writing_when_nothing_material_changed(tmp_path: Path) -> None:
+    path, state, before = saved_once(tmp_path)
+
+    save_state(path, state, T2)
+
+    assert path.read_text(encoding="utf-8") == before, "updated_at만 바뀌면 쓰지 않는다"
+
+
+def test_save_ignores_last_checked_at_when_deciding(tmp_path: Path) -> None:
+    path, state, before = saved_once(tmp_path)
+    # 같은 결과를 다시 조회했을 뿐이다. last_checked_at만 앞으로 간다.
+    state.slots["k"] = record_success(state.slots["k"], remaining=0, threshold=1, checked_at=T2)
+
+    assert save_state(path, state, T2) is False
+    assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "available"),
+        ("remaining", 1),
+        ("last_notified_remaining", 1),
+        ("consecutive_errors", 1),
+        ("last_error", "timeout"),
+        ("last_changed_at", T2),
+    ],
+)
+def test_save_writes_when_a_material_field_changed(
+    tmp_path: Path, field: str, value: Any
+) -> None:
+    path, state, before = saved_once(tmp_path)
+    state.slots["k"] = replace(state.slots["k"], **{field: value})
+
+    assert save_state(path, state, T2) is True
+    assert path.read_text(encoding="utf-8") != before
+
+
+def test_save_writes_when_a_slot_is_added(tmp_path: Path) -> None:
+    path, state, _ = saved_once(tmp_path)
+    state.slots["other"] = record_error(None, "timeout", T2)
+    assert save_state(path, state, T2) is True
+
+
+def test_save_writes_when_the_heartbeat_date_changed(tmp_path: Path) -> None:
+    path, state, _ = saved_once(tmp_path)
+    state.heartbeat_last_sent = date(2026, 7, 29)
+    assert save_state(path, state, T2) is True
+
+
+def test_save_writes_when_the_file_does_not_exist(tmp_path: Path) -> None:
+    assert save_state(state_path(tmp_path), State(), T2) is True
+
+
+def test_save_overwrites_a_corrupt_existing_file(tmp_path: Path) -> None:
+    path = state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ broken", encoding="utf-8")
+
+    assert save_state(path, State(), T2) is True
+    assert load_state(path).slots == {}
+
+
 # --- 정상 조회 기록 -------------------------------------------------------
 
 
