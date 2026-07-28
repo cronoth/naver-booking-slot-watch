@@ -6,10 +6,12 @@
 import json
 import re
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from .models import (
     BookingIdentifiers,
@@ -28,6 +30,34 @@ _BOOKING_PATH = re.compile(r"^/booking/(\d+)/bizes/(\d+)/items/(\d+)/?$")
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_PATTERN = re.compile(r"^\d{2}:\d{2}$")
 
+KST = ZoneInfo("Asia/Seoul")
+
+# 오타를 조용히 무시하면 안 된다. `expires_at`을 `expire_at`으로 잘못 쓰면
+# 만료가 사라져 감시가 영구히 이어진다.
+_ROOT_KEYS = frozenset({"version", "defaults", "monitors"})
+_DEFAULTS_KEYS = frozenset(
+    {
+        "notify_when_remaining_at_least",
+        "notify_on_initial_available",
+        "notify_on_increase",
+        "error_alert_threshold",
+    }
+)
+_MONITOR_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "enabled",
+        "url",
+        "targets",
+        "expires_at",
+        "notify_when_remaining_at_least",
+        "notify_on_initial_available",
+        "notify_on_increase",
+    }
+)
+_TARGET_KEYS = frozenset({"date", "times"})
+
 
 class ConfigError(Exception):
     """설정이 유효하지 않다. 이 예외는 실행을 시작하기 전에 종료시킨다."""
@@ -35,6 +65,10 @@ class ConfigError(Exception):
 
 def parse_booking_url(url: str) -> BookingIdentifiers:
     """예약 URL에서 businessTypeId·businessId·bizItemId를 추출한다."""
+    if not url.isascii():
+        # 이 URL은 ntfy Click 헤더로 나간다. HTTP 헤더는 latin-1로 인코딩되므로
+        # non-ASCII가 섞이면 알림 전송이 UnicodeEncodeError로 죽는다.
+        raise ConfigError(f"URL에 ASCII가 아닌 문자가 있다(퍼센트 인코딩 필요): {url!r}")
     host = urlparse(url).hostname or ""
     if host != "booking.naver.com" and not host.endswith(".booking.naver.com"):
         raise ConfigError(f"네이버 예약 URL이 아니다: {url!r}")
@@ -54,12 +88,14 @@ def load_config(path: Path) -> Config:
     raw = _read_json(path)
     if not isinstance(raw, dict):
         raise ConfigError(f"설정 최상위는 객체여야 한다: {path}")
+    _reject_unknown_keys(raw, _ROOT_KEYS, "설정 최상위")
     if raw.get("version") != CONFIG_VERSION:
         raise ConfigError(f"지원하지 않는 version: {raw.get('version')!r} (필요: {CONFIG_VERSION})")
 
     defaults = raw.get("defaults", {})
     if not isinstance(defaults, dict):
         raise ConfigError("defaults는 객체여야 한다")
+    _reject_unknown_keys(defaults, _DEFAULTS_KEYS, "defaults")
 
     entries = raw.get("monitors")
     if not isinstance(entries, list) or not entries:
@@ -81,8 +117,20 @@ def load_config(path: Path) -> Config:
 
 
 def active_monitors(config: Config, now: datetime) -> tuple[MonitorConfig, ...]:
-    """비활성·만료·대상 없음을 제외한 모니터만 돌려준다."""
-    return tuple(monitor for monitor in config.monitors if _is_active(monitor, now))
+    """지금 조회할 가치가 있는 모니터만, 지난 날짜를 걷어낸 상태로 돌려준다."""
+    today = now.astimezone(KST).date()
+    active: list[MonitorConfig] = []
+    for monitor in config.monitors:
+        if not monitor.enabled:
+            continue
+        if monitor.expires_at is not None and now > monitor.expires_at:
+            continue
+        # 지난 날짜는 예약할 수 없다. 계속 조회하면 빈 응답으로 오류만 쌓인다.
+        targets = tuple(target for target in monitor.targets if target.date >= today)
+        if not targets:
+            continue
+        active.append(replace(monitor, targets=targets))
+    return tuple(active)
 
 
 def group_schedule_requests(monitors: Iterable[MonitorConfig]) -> tuple[ScheduleRequest, ...]:
@@ -98,10 +146,10 @@ def group_schedule_requests(monitors: Iterable[MonitorConfig]) -> tuple[Schedule
     )
 
 
-def _is_active(monitor: MonitorConfig, now: datetime) -> bool:
-    if not monitor.enabled or not monitor.targets:
-        return False
-    return monitor.expires_at is None or now <= monitor.expires_at
+def _reject_unknown_keys(raw: dict[str, Any], known: frozenset[str], where: str) -> None:
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise ConfigError(f"{where}에 알 수 없는 키가 있다: {', '.join(unknown)}")
 
 
 def _read_json(path: Path) -> Any:
@@ -131,6 +179,7 @@ def _parse_monitor(entry: Any, defaults: dict[str, Any]) -> MonitorConfig:
 def _build_monitor(
     monitor_id: str, entry: dict[str, Any], defaults: dict[str, Any]
 ) -> MonitorConfig:
+    _reject_unknown_keys(entry, _MONITOR_KEYS, "monitor")
     enabled = entry.get("enabled")
     if not isinstance(enabled, bool):
         raise ConfigError(f"enabled는 true 또는 false여야 한다: {enabled!r}")
@@ -164,6 +213,7 @@ def _parse_targets(raw: Any) -> tuple[SlotTarget, ...]:
     for item in raw:
         if not isinstance(item, dict):
             raise ConfigError(f"targets 항목은 객체여야 한다: {item!r}")
+        _reject_unknown_keys(item, _TARGET_KEYS, "targets 항목")
         target_date = _parse_date(item.get("date"))
         if target_date in seen_dates:
             raise ConfigError(f"date 중복: {target_date.isoformat()}")

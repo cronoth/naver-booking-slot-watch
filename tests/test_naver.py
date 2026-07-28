@@ -12,6 +12,7 @@ from booking_slot_watch.models import BookingIdentifiers
 from booking_slot_watch.naver import (
     GRAPHQL_URL,
     KST,
+    MAX_RATE_LIMIT_BACKOFF,
     NaverApiError,
     NaverBookingClient,
     parse_hourly_schedule,
@@ -41,6 +42,24 @@ class SleepRecorder:
 
     def __call__(self, seconds: float) -> None:
         self.delays.append(seconds)
+
+
+class CapturingSession:
+    """post 호출 인자를 그대로 잡아두는 대역."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.body = body
+        self.calls: list[dict[str, Any]] = []
+
+    def post(self, url: str, **kwargs: Any) -> requests.Response:
+        self.calls.append({"url": url, **kwargs})
+        response = requests.Response()
+        response.status_code = 200
+        response._content = json.dumps(self.body).encode("utf-8")
+        return response
+
+    def close(self) -> None:
+        pass
 
 
 # --- 응답 파싱 (순수 함수) -------------------------------------------------
@@ -322,12 +341,32 @@ def test_non_json_body_raises_invalid_json() -> None:
     assert exc.value.kind == "invalid_json"
 
 
-@responses.activate
-def test_request_uses_documented_timeout() -> None:
-    responses.add(responses.POST, GRAPHQL_URL, json=payload(), status=200)
-    client = NaverBookingClient(sleep=SleepRecorder())
+def test_request_carries_the_documented_timeout() -> None:
+    """`client.timeout`만 보면 요청에 실제로 전달되는지 검증하지 못한다."""
+    session = CapturingSession(payload())
+    client = NaverBookingClient(session=session, sleep=SleepRecorder())  # type: ignore[arg-type]
+
     client.fetch_hourly_schedule(IDENTIFIERS, TARGET_DATE)
-    assert client.timeout == 15.0
+
+    assert session.calls[0]["timeout"] == 15.0
+
+
+def test_rate_limit_backoff_is_capped() -> None:
+    """상한이 없으면 한 번의 조회가 수십 분 동안 잠들어 취소 시 상태를 잃는다."""
+    responses_added = 0
+    sleeper = SleepRecorder()
+    client = NaverBookingClient(sleep=sleeper)
+
+    with responses.RequestsMock() as mock:
+        mock.add(responses.POST, GRAPHQL_URL, json={}, status=429)
+        for _ in range(30):
+            responses_added += 1
+            with pytest.raises(NaverApiError):
+                client.fetch_hourly_schedule(IDENTIFIERS, TARGET_DATE)
+
+    ceiling = 5.0 * MAX_RATE_LIMIT_BACKOFF
+    assert max(sleeper.delays) == pytest.approx(ceiling)
+    assert sum(sleeper.delays[-2:]) <= 60.0, "한 조회의 총 대기가 취소 유예를 넘지 않아야 한다"
 
 
 @responses.activate

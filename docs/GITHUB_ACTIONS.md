@@ -52,6 +52,16 @@ concurrency:
 
 자체 연결 실행 과정에서 이전 job과 다음 job이 겹치지 않도록 주의한다.
 
+단, `cancel-in-progress: true`를 모든 이벤트에 적용하면 안 된다. cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧으므로, 복구용 schedule 실행이 정상 동작 중인 job을 자기 종료 시각 24분 전에 매번 취소한다. 그러면 `Trigger next run` 단계가 실제로는 한 번도 실행되지 않고, 설계한 연결 실행 모델이 아니라 5시간마다 재시작하는 모델이 돌아간다.
+
+schedule은 취소하지 않고 큐에서 기다리게 한다. 체인이 살아 있으면 복구 실행은 그냥 대기하다 교체되고, 체인이 죽었을 때만 실제로 인수한다.
+
+```yaml
+concurrency:
+  group: naver-booking-slot-watch
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+```
+
 ## 3. job 구조
 
 ```yaml

@@ -16,7 +16,15 @@ from .config import ConfigError, active_monitors, group_schedule_requests
 from .models import BookingIdentifiers, Config, MonitorConfig, SlotRequest
 from .naver import HourlySchedule, NaverApiError, NaverBookingClient
 from .notifier import Notifier
-from .state import State, evaluate_error, evaluate_slot, mark_notified, save_state, slot_key
+from .state import (
+    State,
+    StateError,
+    evaluate_error,
+    evaluate_slot,
+    mark_notified,
+    save_state,
+    slot_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +310,18 @@ def run_loop(
             break
 
         iterations += 1
-        outcome = check_once(config, state, client=client, notifier=notifier, now=now)
+        try:
+            outcome = check_once(config, state, client=client, notifier=notifier, now=now)
+        except StateError:
+            raise  # 상태 파일을 쓸 수 없는 것은 치명적 오류다.
+        except Exception:
+            # 예상 못한 예외 하나로 5.4시간 job을 잃지 않는다. 상태는 그대로 남는다.
+            logger.exception("조회 회차에서 예상 못한 오류 - 루프를 계속한다")
+            self_sleep = min(next_interval(settings, random_fn), _remaining(deadline, now_fn))
+            if self_sleep <= 0:
+                break
+            _sleep_in_steps(self_sleep, sleep_fn, should_stop)
+            continue
 
         if outcome.slots_active == 0:
             logger.info("활성 대상 없음 — 루프를 종료한다")
@@ -312,7 +331,7 @@ def run_loop(
             # 작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
             save_state(state_path, state, now)
 
-        remaining = (deadline - now_fn()).total_seconds()
+        remaining = _remaining(deadline, now_fn)
         if remaining <= 0:
             break
         _sleep_in_steps(min(next_interval(settings, random_fn), remaining), sleep_fn, should_stop)
@@ -325,6 +344,10 @@ def run_loop(
         "saved" if written else "unchanged",
     )
     return LoopResult(iterations=iterations, stopped_reason=reason)
+
+
+def _remaining(deadline: datetime, now_fn: Callable[[], datetime]) -> float:
+    return (deadline - now_fn()).total_seconds()
 
 
 def _sleep_in_steps(

@@ -23,7 +23,7 @@ from booking_slot_watch.monitor import (
 )
 from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverBookingClient
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
-from booking_slot_watch.state import State, load_state
+from booking_slot_watch.state import State, StateError, load_state
 
 TOPIC = "loop-topic"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -256,18 +256,26 @@ def test_state_is_saved_when_the_loop_ends(tmp_path: Path) -> None:
 
 @responses.activate
 def test_state_is_saved_right_after_a_notification(tmp_path: Path) -> None:
-    """작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다."""
+    """작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
+
+    루프 종료 저장과 구분하려면 루프가 끝나기 **전에** 파일을 확인해야 한다.
+    첫 대기 시점에 이미 기록돼 있어야 한다.
+    """
     responses.add(responses.POST, GRAPHQL_URL, json=payload(1))
     responses.add(responses.POST, NTFY_URL, json={})
-    clock = FakeClock(START)
-    state = State()
+    path = tmp_path / "state.json"
+    observed: list[int | None] = []
 
-    run(write_config(tmp_path), tmp_path, clock=clock, settings=settings(3600), state=state)
+    class ObservingClock(FakeClock):
+        def sleep(self, seconds: float) -> None:
+            if not observed:  # 첫 회차 직후, 루프 종료 저장 이전
+                slot = load_state(path).slots["event:2026-08-29:14:30"]
+                observed.append(slot.last_notified_remaining)
+            super().sleep(seconds)
 
-    # 첫 회차에서 저장됐는지 보려면 루프 종료 저장과 구분이 필요하므로
-    # 알림 직후 저장된 값이 유지되는지 확인한다.
-    saved = load_state(tmp_path / "state.json")
-    assert saved.slots["event:2026-08-29:14:30"].last_notified_remaining == 1
+    run(write_config(tmp_path), tmp_path, clock=ObservingClock(START), settings=settings(180))
+
+    assert observed == [1], "알림 직후 곧바로 저장돼 있어야 한다"
 
 
 @responses.activate
@@ -311,6 +319,69 @@ def test_changed_remaining_is_written(tmp_path: Path) -> None:
 
     assert path.read_text(encoding="utf-8") != after_first
     assert load_state(path).slots["event:2026-08-29:14:30"].status == "available"
+
+
+def test_unexpected_exception_does_not_kill_the_loop(tmp_path: Path) -> None:
+    """한 회차의 예상 못한 예외가 5.4시간 job 전체를 죽이면 안 된다."""
+
+    class ExplodingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
+            self.calls += 1
+            raise RuntimeError("예상 못한 오류")
+
+        def close(self) -> None:
+            pass
+
+    client = ExplodingClient()
+    clock = FakeClock(START)
+    result = run_loop(
+        write_config(tmp_path),
+        State(),
+        client=client,  # type: ignore[arg-type]
+        notifier=Notifier(NtfyConfig(topic=TOPIC)),
+        state_path=tmp_path / "state.json",
+        settings=settings(180),
+        clock=clock.now,
+        sleep=clock.sleep,
+        random_fn=lambda: 0.0,
+    )
+
+    assert result.iterations == 3
+    assert result.stopped_reason == "deadline"
+    assert client.calls == 3
+
+
+def test_state_write_failure_stays_fatal(tmp_path: Path) -> None:
+    """상태 파일 쓰기 실패는 치명적 오류다. 루프 가드가 이걸 삼키면 안 된다."""
+
+    class ExplodingClient:
+        def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
+            raise RuntimeError("조회 실패")
+
+        def close(self) -> None:
+            pass
+
+    clock = FakeClock(START)
+    # 부모가 파일이므로 mkdir 자체가 실패한다.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+
+    with pytest.raises(StateError):
+        run_loop(
+            write_config(tmp_path),
+            State(),
+            client=ExplodingClient(),  # type: ignore[arg-type]
+            notifier=Notifier(NtfyConfig(topic=TOPIC)),
+            state_path=blocker / "state.json",
+            settings=settings(180),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+            should_stop=lambda: True,  # 즉시 종료 저장으로 간다
+        )
 
 
 @responses.activate

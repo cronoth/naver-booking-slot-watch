@@ -48,6 +48,12 @@ REQUEST_TIMEOUT_SEC = 15.0
 #: 같은 조회에서 최대 2회 재시도하며 그 사이 대기 시간.
 RETRY_DELAYS_SEC = (2.0, 5.0)
 RATE_LIMITED_STATUSES = frozenset({403, 429})
+#: 403/429가 이어질 때 대기 배수의 상한.
+#:
+#: 상한이 없으면 5시간 job에서 연속 실패가 200회 넘게 쌓여 한 번의 조회가
+#: 수십 분 동안 잠든다. 그 sleep은 종료 신호로 끊을 수 없으므로 Actions가
+#: 작업을 취소할 때 유예 시간을 넘겨 종료 직전 상태 저장을 잃는다.
+MAX_RATE_LIMIT_BACKOFF = 6
 
 _START_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -179,7 +185,7 @@ class NaverBookingClient:
         self, identifiers: BookingIdentifiers, target_date: date
     ) -> HourlySchedule:
         body = _request_body(identifiers, target_date)
-        backoff = 1 + self._rate_limit_streak
+        backoff = min(1 + self._rate_limit_streak, MAX_RATE_LIMIT_BACKOFF)
         last_error: NaverApiError | None = None
 
         for attempt in range(len(self._retry_delays) + 1):

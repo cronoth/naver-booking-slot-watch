@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -263,6 +263,63 @@ def test_rejects_duplicate_date_within_one_monitor(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_rejects_non_ascii_url(tmp_path: Path) -> None:
+    """HTTP 헤더는 latin-1로 인코딩되므로 non-ASCII URL은 ntfy Click에서 터진다."""
+    bad = "https://m.booking.naver.com/booking/12/bizes/1/items/2?theme=플레이스"
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[monitor_dict(url=bad)]))
+
+
+# --- 알 수 없는 키 거부 ----------------------------------------------------
+#
+# monitors.json은 사람이 GitHub 웹 편집기로 고치는 주 인터페이스다. 오타를
+# 조용히 무시하면 expires_at → expire_at 하나로 만료가 사라져 영구히 돌아간다.
+
+
+def test_rejects_unknown_root_key(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="monitorss"):
+        load_config(write_config(tmp_path, monitorss=[]))
+
+
+def test_rejects_unknown_defaults_key(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="notify_on_increse"):
+        load_config(write_config(tmp_path, defaults={"notify_on_increse": True}))
+
+
+@pytest.mark.parametrize(
+    "bad_key",
+    ["expire_at", "notify_on_increse", "notify_when_remaining_atleast", "enable", "junk"],
+)
+def test_rejects_unknown_monitor_key(tmp_path: Path, bad_key: str) -> None:
+    entry = monitor_dict(**{bad_key: "값"})
+    with pytest.raises(ConfigError, match=bad_key):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_typo_in_expires_at_does_not_silently_disable_expiry(tmp_path: Path) -> None:
+    entry = monitor_dict()
+    entry["expire_at"] = entry.pop("expires_at")
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_rejects_unknown_target_key(tmp_path: Path) -> None:
+    entry = monitor_dict(
+        targets=[{"date": "2026-08-29", "times": ["11:00"], "time": ["12:00"]}]
+    )
+    with pytest.raises(ConfigError, match="time"):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_accepts_every_documented_monitor_key(tmp_path: Path) -> None:
+    entry = monitor_dict(
+        notify_when_remaining_at_least=2,
+        notify_on_initial_available=False,
+        notify_on_increase=False,
+    )
+    assert load_config(write_config(tmp_path, monitors=[entry])).monitors
+
+
 def test_rejects_missing_required_monitor_field(tmp_path: Path) -> None:
     incomplete = monitor_dict()
     del incomplete["url"]
@@ -296,7 +353,8 @@ def test_active_monitors_keeps_monitor_before_expiry(tmp_path: Path) -> None:
 
 
 def test_active_monitors_keeps_monitor_without_expiry(tmp_path: Path) -> None:
-    monitor = monitor_dict()
+    """expires_at이 없으면 대상 날짜가 남아 있는 동안 계속 활성이다."""
+    monitor = monitor_dict(targets=[{"date": "2099-06-01", "times": ["11:00"]}])
     del monitor["expires_at"]
     config = load_config(write_config(tmp_path, monitors=[monitor]))
     active = active_monitors(config, datetime(2099, 1, 1, tzinfo=KST))
@@ -315,6 +373,45 @@ def test_active_monitors_mixes_active_and_inactive(tmp_path: Path) -> None:
     config = load_config(path)
     active = active_monitors(config, datetime(2026, 7, 28, 14, 0, tzinfo=KST))
     assert [m.id for m in active] == ["alive"]
+
+
+def test_past_target_dates_are_dropped(tmp_path: Path) -> None:
+    """지난 날짜는 예약할 수 없다. 계속 조회하면 empty_schedule 오류만 쌓인다."""
+    entry = monitor_dict(
+        targets=[
+            {"date": "2026-07-20", "times": ["11:00"]},
+            {"date": "2026-08-29", "times": ["14:00"]},
+        ],
+    )
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    (monitor,) = active_monitors(config, datetime(2026, 7, 28, 14, 0, tzinfo=KST))
+    assert [target.date for target in monitor.targets] == [date(2026, 8, 29)]
+
+
+def test_today_is_not_treated_as_past(tmp_path: Path) -> None:
+    entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    active = active_monitors(config, datetime(2026, 7, 28, 23, 0, tzinfo=KST))
+    assert [t.date for m in active for t in m.targets] == [date(2026, 7, 28)]
+
+
+def test_monitor_with_only_past_dates_becomes_inactive(tmp_path: Path) -> None:
+    entry = monitor_dict(targets=[{"date": "2026-07-20", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    assert active_monitors(config, datetime(2026, 7, 28, 14, 0, tzinfo=KST)) == ()
+
+
+def test_past_date_filtering_uses_korean_time(tmp_path: Path) -> None:
+    """UTC 기준으로 판단하면 한국 날짜가 바뀐 직후 하루를 잘못 버린다."""
+    entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    # UTC 2026-07-27 16:00 == KST 2026-07-28 01:00. 대상 날짜는 '오늘'이다.
+    utc_now = datetime(2026, 7, 27, 16, 0, tzinfo=UTC)
+    assert len(active_monitors(config, utc_now)) == 1
 
 
 # --- 요청 그룹화 ----------------------------------------------------------

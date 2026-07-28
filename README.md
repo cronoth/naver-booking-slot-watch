@@ -189,6 +189,18 @@ git push
 
 상태 파일 커밋은 `push` 트리거 대상이 아니다(`state/**`가 `paths`에 없음). 그래서 상태 커밋이 워크플로를 다시 켜는 무한 루프가 생기지 않는다.
 
+중단은 `"enabled": false` 또는 `expires_at`을 과거로 두면 된다. 지난 날짜의 `targets`는 자동으로 제외되므로, 대상 날짜가 전부 지나간 모니터는 그것만으로 비활성이 된다.
+
+감시가 완전히 끝났으면 복구용 cron이 5시간마다 빈 job을 띄우지 않도록 워크플로를 끈다.
+
+```powershell
+gh workflow disable monitor.yml
+```
+
+### `concurrency` 동작
+
+`push`는 실행 중인 job을 즉시 취소하고 새 설정으로 다시 시작한다. `schedule`은 취소하지 않고 큐에서 기다린다 — cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧아서, 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽여 자기 연결 실행이 영원히 일어나지 않는다.
+
 ### exit code와 워크플로의 관계
 
 `monitor`가 `3`(활성 대상 없음)으로 끝나면 job은 성공으로 처리하되 다음 실행을 만들지 않는다. `1`·`2`로 끝나면 job이 실패해 연결이 끊기고, 5시간 cron이 복구한다. 루프는 조회 실패로 종료하지 않으므로 `4`를 반환하지 않는다.
@@ -207,7 +219,7 @@ src/booking_slot_watch/
   state.py               상태 파일 입출력, 상태 전이, 알림 판단 순수 함수
   notifier.py            ntfy 전송
   monitor.py             1회 조회 오케스트레이션과 반복 루프
-tests/                   239개 테스트, fixtures/에 실제 응답 형태
+tests/                   테스트, fixtures/에 실제 응답 형태
 monitors.json            실제 감시 설정
 monitors.example.json    형식 예시
 state/availability.json  회차별 상태 (Actions가 커밋한다)
