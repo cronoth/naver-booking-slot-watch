@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "defaults": {
+    "notify_when_remaining_at_least": 1,
+    "notify_on_initial_available": true,
+    "notify_on_increase": true,
+    "error_alert_threshold": 3
+  },
+  "monitors": [
+    {
+      "id": "example-event",
+      "name": "예시 공연",
+      "enabled": true,
+      "url": "https://m.booking.naver.com/booking/12/bizes/111111/items/2222222",
+      "targets": [
+        {
+          "date": "2099-01-01",
+          "times": ["11:00", "14:00", "17:00"]
+        }
+      ],
+      "notify_when_remaining_at_least": 1,
+      "expires_at": "2099-01-01T17:00:00+09:00"
+    },
+    {
+      "id": "example-restaurant",
+      "name": "예시 식당",
+      "enabled": false,
+      "url": "https://m.booking.naver.com/booking/6/bizes/333/items/444",
+      "targets": [
+        {
+          "date": "2099-01-02",
+          "times": ["18:00", "19:00"]
+        },
+        {
+          "date": "2099-01-03",
+          "times": ["18:00"]
+        }
+      ],
+      "expires_at": "2099-01-03T19:00:00+09:00"
+    }
+  ]
+}

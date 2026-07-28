@@ -1,0 +1,40 @@
+{
+  "data": {
+    "schedule": {
+      "bizItemSchedule": {
+        "hourly": [
+          {
+            "unitStartTime": "2026-08-29 11:00:00",
+            "unitBookingCount": 10,
+            "unitStock": 10,
+            "isUnitSaleDay": true,
+            "__typename": "HourlySchedule"
+          },
+          {
+            "unitStartTime": "2026-08-29 14:00:00",
+            "unitBookingCount": 4,
+            "unitStock": 5,
+            "isUnitSaleDay": true,
+            "__typename": "HourlySchedule"
+          },
+          {
+            "unitStartTime": "2026-08-29 17:00:00",
+            "unitBookingCount": 0,
+            "unitStock": 3,
+            "isUnitSaleDay": true,
+            "__typename": "HourlySchedule"
+          },
+          {
+            "unitStartTime": "2026-08-29 20:00:00",
+            "unitBookingCount": 0,
+            "unitStock": 2,
+            "isUnitSaleDay": false,
+            "__typename": "HourlySchedule"
+          }
+        ],
+        "__typename": "BizItemSchedule"
+      },
+      "__typename": "Schedule"
+    }
+  }
+}

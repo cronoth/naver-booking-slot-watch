@@ -1,0 +1,242 @@
+# GitHub Actions 운영 설계
+
+## 1. 기본 운영 모델
+
+GitHub Actions cron은 최소 5분 간격이며 지연될 수 있으므로, 단순 cron 1회 실행 방식으로 감시하지 않는다.
+
+대신 하나의 Action job이 약 5시간 30분 동안 살아 있으면서 내부에서 70~90초마다 GraphQL 조회를 반복한다.
+
+```text
+Action A 시작
+→ 약 5.5시간 동안 반복 조회
+→ 상태 저장·커밋
+→ 활성 대상이 남아 있으면 Action B 수동 트리거
+→ Action B가 같은 동작 반복
+```
+
+체인이 끊긴 경우를 복구하기 위해 별도 schedule 이벤트를 둔다.
+
+## 2. 워크플로 이벤트
+
+권장 `monitor.yml` 개념 구조:
+
+```yaml
+name: Naver Booking Slot Monitor
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches: [main]
+    paths:
+      - "monitors.json"
+      - "src/**"
+      - "pyproject.toml"
+      - ".github/workflows/monitor.yml"
+
+  schedule:
+    - cron: "7 */5 * * *"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: naver-booking-slot-watch
+  cancel-in-progress: true
+```
+
+### `concurrency`
+
+설정 또는 코드가 변경되면 실행 중인 기존 모니터를 취소하고 새 설정으로 즉시 시작한다.
+
+자체 연결 실행 과정에서 이전 job과 다음 job이 겹치지 않도록 주의한다.
+
+## 3. job 구조
+
+```yaml
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Monitor
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER_URL: ${{ secrets.NTFY_SERVER_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          NTFY_HEARTBEAT_TOPIC: ${{ secrets.NTFY_HEARTBEAT_TOPIC }}
+          CHECK_INTERVAL_SEC: "70"
+          CHECK_JITTER_SEC: "20"
+          LOOP_HOURS: "5.4"
+        run: uv run booking-slot-watch monitor
+
+      - name: Commit state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/availability.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: update monitor state"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Trigger next run
+        if: ${{ success() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run booking-slot-watch has-active-targets
+          gh workflow run monitor.yml --repo "${{ github.repository }}"
+```
+
+`uv`가 `.python-version`을 보고 인터프리터를 내려받으므로 워크플로에 파이썬 버전을 적지 않는다.
+
+위 예시는 개념 구조다. 실제 구현에서는 `has-active-targets`가 비활성 상태를 exit code로 표현하도록 정한다.
+
+예시:
+
+```text
+exit 0 = 활성 대상 있음
+exit 3 = 활성 대상 없음
+exit 1 = 설정 오류
+```
+
+셸에서 exit 3을 정상적인 “다음 실행 생략”으로 다루는 별도 분기가 필요하다.
+
+## 4. push 재귀 방지
+
+상태 파일 커밋으로 `push` 이벤트가 다시 모니터를 시작하지 않도록 `push.paths`에 `state/**`를 포함하지 않는다.
+
+재시작 대상:
+
+- `monitors.json`
+- 소스코드
+- 워크플로
+- 패키지 설정
+
+## 5. 중복 실행과 연결 안전성
+
+고려할 상황:
+
+- schedule 복구 실행과 기존 장시간 실행이 겹침
+- 설정 push로 기존 실행 취소
+- 이전 실행의 연결 트리거와 새 push 실행이 동시에 발생
+- 상태 커밋 충돌
+
+대응:
+
+1. `concurrency` 그룹 하나 사용
+2. `cancel-in-progress: true`
+3. 상태 커밋 전 `git pull --rebase`
+4. 상태 파일 병합 충돌 시 무리하게 덮어쓰지 않고 로그 후 종료
+5. 새 실행이 시작되면 최신 `main` 상태 사용
+
+## 6. Secret 설정
+
+필수:
+
+```powershell
+$topic | gh secret set NTFY_TOPIC
+```
+
+선택:
+
+```powershell
+"https://ntfy.sh" | gh secret set NTFY_SERVER_URL
+$token | gh secret set NTFY_TOKEN
+$heartbeatTopic | gh secret set NTFY_HEARTBEAT_TOPIC
+```
+
+`NTFY_SERVER_URL`이 없으면 코드 기본값으로 `https://ntfy.sh`를 사용한다.
+
+## 7. 최초 실행
+
+```powershell
+gh workflow list
+gh workflow run monitor.yml
+gh run list --workflow monitor.yml --limit 5
+gh run watch
+```
+
+## 8. 공개 저장소 Actions 사용 주의
+
+- 공개 저장소의 표준 러너 실행 시간은 private 저장소의 포함 분과 별도로 취급된다.
+- 작업 하나의 실행 시간 제한은 여전히 존재한다.
+- Actions를 무기한 범용 서버로 사용하는 것은 안정적으로 보장되는 운영 모델이 아니다.
+- 특정 예약 감시가 끝나면 자동으로 실행을 멈춘다.
+- 활성 대상이 없을 때 계속 연결 실행하면 안 된다.
+- 장기간 다수 대상을 운영하려면 OCI Docker로 이전할 수 있도록 핵심 로직을 Actions와 분리한다.
+
+## 9. 테스트 워크플로
+
+```yaml
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - run: uv run mypy
+```
+
+## 10. 운영 명령
+
+설정 변경:
+
+```powershell
+code monitors.json
+git add monitors.json
+git commit -m "config: update booking targets"
+git push
+```
+
+중단:
+
+```json
+"enabled": false
+```
+
+수동 재실행:
+
+```powershell
+gh workflow run monitor.yml
+```
+
+최근 로그:
+
+```powershell
+gh run list --workflow monitor.yml --limit 10
+gh run view <RUN_ID> --log
+```

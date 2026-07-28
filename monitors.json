@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "defaults": {
+    "notify_when_remaining_at_least": 1,
+    "notify_on_initial_available": true,
+    "notify_on_increase": true,
+    "error_alert_threshold": 3
+  },
+  "monitors": [
+    {
+      "id": "event-20260829",
+      "name": "8월 29일 예약",
+      "enabled": true,
+      "url": "https://m.booking.naver.com/booking/12/bizes/472710/items/7804183?area=ple&lang=ko&startDateTime=2026-08-29T00%3A00%3A00%2B09%3A00&tab=book&theme=place",
+      "targets": [
+        {
+          "date": "2026-08-29",
+          "times": ["10:30", "12:30", "14:30"]
+        }
+      ],
+      "expires_at": "2026-08-29T17:00:00+09:00"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "naver-booking-slot-watch"
+version = "0.1.0"
+description = "네이버 예약의 특정 날짜·시간 회차 잔여석을 감시하고 ntfy로 알림을 보낸다"
+requires-python = ">=3.13"
+dependencies = [
+  "requests>=2.32,<3",
+  # Windows에는 시스템 tz 데이터베이스가 없어 zoneinfo.ZoneInfo("Asia/Seoul")가 실패한다.
+  "tzdata>=2025.1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.12,<1",
+  "mypy>=1.17,<2",
+  "responses>=0.25,<1",
+]
+
+[project.scripts]
+booking-slot-watch = "booking_slot_watch.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+strict = true

@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "monitors.json"
+      - "monitors.example.json"
+      - ".github/workflows/test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      # 파이썬 버전은 .python-version과 pyproject.toml이 단일 출처다.
+      - run: uv run --extra dev ruff check .
+      - run: uv run --extra dev mypy
+      - run: uv run --extra dev pytest -q
