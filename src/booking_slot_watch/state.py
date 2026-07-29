@@ -165,6 +165,16 @@ def mark_notified(slot: SlotState) -> SlotState:
     return replace(slot, last_notified_remaining=slot.remaining)
 
 
+def mark_send_failed(slot: SlotState) -> SlotState:
+    """알림 전송이 확인되지 않았을 때 호출한다.
+
+    이전 수량 기록을 지워야 다음 조회가 `_notification_reason`의 '전송 미확인' 분기를
+    타고 다시 알린다. 남겨두면 5석 알림 성공 → 매진 → 1석 재개방 전송 실패 순서에서
+    `1 > 5`가 거짓이라 재개방 알림이 영구히 묻힌다.
+    """
+    return replace(slot, last_notified_remaining=None)
+
+
 def load_state(path: Path) -> State:
     """상태 파일을 읽는다. 파일이 없으면 빈 상태로 시작한다."""
     try:
