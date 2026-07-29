@@ -131,9 +131,7 @@ def _parse_slot(raw: Any) -> SlotAvailability:
         raise _malformed(f"hourly 항목이 객체가 아니다: {type(raw).__name__}")
     stock = _required_int(raw, "unitStock")
     booking_count = _required_int(raw, "unitBookingCount")
-    sale_enabled = raw.get("isUnitSaleDay", True)
-    if not isinstance(sale_enabled, bool):
-        raise _malformed(f"isUnitSaleDay가 불리언이 아니다: {sale_enabled!r}")
+    sale_enabled = _required_bool(raw, "isUnitSaleDay")
     return SlotAvailability(
         start_at=_parse_start_time(raw.get("unitStartTime")),
         stock=stock,
@@ -141,6 +139,18 @@ def _parse_slot(raw: Any) -> SlotAvailability:
         remaining=max(stock - booking_count, 0),
         sale_enabled=sale_enabled,
     )
+
+
+def _required_bool(raw: dict[str, Any], key: str) -> bool:
+    """누락도 오류로 다룬다.
+
+    쿼리에 명시해 요청한 필드가 없으면 응답 계약이 바뀐 것이다. 기본값을 주면
+    판매하지 않는 회차의 재고를 예약 가능으로 오판한다.
+    """
+    value = raw.get(key)
+    if not isinstance(value, bool):
+        raise _malformed(f"{key}가 불리언이 아니다: {value!r}")
+    return value
 
 
 def _required_int(raw: dict[str, Any], key: str) -> int:

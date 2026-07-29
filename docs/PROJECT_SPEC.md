@@ -103,10 +103,13 @@ hourly {
 }
 ```
 
+네 필드 모두 필수다. 쿼리에 명시해 요청하므로 하나라도 없거나 형태가 다르면 응답 계약이 바뀐 것으로 보고 `malformed_response`로 끝낸다. 특히 `isUnitSaleDay`에 기본값을 주면 안 된다 — 판매하지 않는 회차의 재고를 예약 가능으로 오판해 잘못된 알림을 보낸다.
+
 잔여 수량 계산:
 
 ```text
 remaining = max(unitStock - unitBookingCount, 0)
+isUnitSaleDay=false → remaining을 0으로 다룬다 (재고가 남아도 예약할 수 없다)
 ```
 
 ### 중요 상태 구분

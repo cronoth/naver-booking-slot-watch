@@ -142,7 +142,9 @@ def test_missing_response_path_raises_malformed_response(missing_key: str) -> No
     assert exc.value.kind == "malformed_response"
 
 
-@pytest.mark.parametrize("field", ["unitStartTime", "unitStock", "unitBookingCount"])
+@pytest.mark.parametrize(
+    "field", ["unitStartTime", "unitStock", "unitBookingCount", "isUnitSaleDay"]
+)
 def test_missing_slot_field_raises_malformed_response(field: str) -> None:
     data = payload()
     del hourly(data)[1][field]
@@ -151,10 +153,18 @@ def test_missing_slot_field_raises_malformed_response(field: str) -> None:
     assert exc.value.kind == "malformed_response"
 
 
-def test_missing_is_unit_sale_day_defaults_to_enabled() -> None:
+@pytest.mark.parametrize("bad_value", [None, "true", 1])
+def test_non_boolean_is_unit_sale_day_raises_malformed_response(bad_value: object) -> None:
+    """이 필드는 우리가 쿼리에 명시해 요청한다. 없거나 형태가 다르면 계약이 바뀐 것이다.
+
+    판매 가능으로 기본값을 주면 판매하지 않는 회차의 재고를 예약 가능으로 오판해
+    잘못된 알림을 보낸다. malformed_response는 이전 정상 상태를 보존한다.
+    """
     data = payload()
-    del hourly(data)[1]["isUnitSaleDay"]
-    assert parse_hourly_schedule(data, TARGET_DATE).slots[1].sale_enabled is True
+    hourly(data)[1]["isUnitSaleDay"] = bad_value
+    with pytest.raises(NaverApiError) as exc:
+        parse_hourly_schedule(data, TARGET_DATE)
+    assert exc.value.kind == "malformed_response"
 
 
 @pytest.mark.parametrize("bad_time", ["2026-08-29T14:00:00", "14:00", "", "언제인가"])
