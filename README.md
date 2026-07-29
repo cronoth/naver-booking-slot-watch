@@ -123,6 +123,7 @@ uv run booking-slot-watch send-test-notification
 | `check-once` | 활성 대상을 한 번 조회하고 필요하면 알림 | O |
 | `monitor` | 장시간 반복 감시 루프 | O |
 | `send-test-notification` | ntfy 테스트 알림 전송 | O |
+| `send-ops-alert` | 운영 경고를 ntfy로 전송(`--message`). 워크플로 셸이 사용 | O |
 
 공통 옵션: `--config`(기본 `monitors.json`), `--state`(기본 `state/availability.json`)
 
@@ -253,7 +254,12 @@ exit code를 본다. `2`면 설정 오류다 — `NTFY_TOPIC` Secret이 없거�
 `uv run booking-slot-watch has-active-targets`를 돌린다. `3`이면 만료되거나 비활성이라 정상 종료된 것이다. `0`인데 실행이 없으면 체인이 끊긴 것이므로 `gh workflow run monitor.yml`로 다시 시작한다(cron도 5시간 안에 복구한다).
 
 **같은 알림이 여러 번 온다**
-전송이 확인되지 않으면 `last_notified_remaining`을 갱신하지 않고 다음 루프에서 재시도한다. 상태 커밋이 rebase 충돌로 푸시되지 못한 경우에도 다음 실행이 예전 상태로 시작해 재알림할 수 있다. Actions 로그의 `상태 파일 rebase 충돌` 경고를 확인한다.
+전송이 확인되지 않으면 `last_notified_remaining`을 갱신하지 않고 다음 루프에서 재시도한다. 상태를 원격에 남기지 못한 경우에도 다음 실행이 예전 상태로 시작해 재알림할 수 있다. 이때는 **`상태 저장 실패` ntfy 경고가 따로 온다** — 워크플로 로그를 뒤지지 않아도 알 수 있다.
+
+**`감시 중단` 알림이 왔다**
+모든 회차가 연속 5회(약 6~8분) 실패했다는 뜻이다. 감시가 사실상 멈춰 있다. 본문의 `점검: Actions 로그의 error= 값`대로 로그를 보고 `malformed_response`(파서 수정 필요)인지 `rate_limited`(간격 상향)인지 판단한다. 이 알림은 임계값에 도달한 회차에 한 번만 오고, **job은 실패시키지 않는다** — 연결 실행을 끊고 지연이 큰 cron에 복구를 맡기지 않기 위해서다.
+
+일일 Heartbeat도 이 상황에서는 제목이 `조회 실패 중`으로 바뀐다. `정상 작동 중`이라고 오는 동안은 최소 한 회차라도 성공하고 있다는 뜻이다.
 
 ## 주의
 

@@ -254,6 +254,83 @@ def test_same_product_and_date_uses_a_single_graphql_call(tmp_path: Path) -> Non
 
 
 @responses.activate
+def test_stops_starting_new_request_groups_when_told_to(tmp_path: Path) -> None:
+    """종료 시각이 임박하면 남은 그룹을 시작하지 않는다.
+
+    한 회차가 모든 그룹을 끝까지 돌면 대상이 많을 때 연결 실행 예산을 다 먹는다.
+    """
+    responses.add(responses.POST, GRAPHQL_URL, json=payload())
+    entry = monitor_entry(
+        targets=[
+            {"date": "2026-08-29", "times": ["12:30", "14:30"]},
+            {"date": "2026-08-30", "times": ["12:30"]},
+        ]
+    )
+    config = write_config(tmp_path, [entry])
+    state = State()
+    calls = {"n": 0}
+
+    def should_continue() -> bool:
+        calls["n"] += 1
+        return calls["n"] <= 1  # 첫 그룹만 허용
+
+    client = NaverBookingClient(sleep=lambda _: None)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        outcome = check_once(
+            config, state, client=client, notifier=notifier, now=NOW,
+            should_continue=should_continue,
+        )
+    finally:
+        client.close()
+        notifier.close()
+
+    graphql = [c for c in responses.calls if c.request.url == GRAPHQL_URL]
+    assert len(graphql) == 1, "두 번째 그룹은 요청조차 하지 않아야 한다"
+    assert outcome.slots_checked == 2
+    assert outcome.slots_skipped == 1
+    assert "event:2026-08-30:12:30" not in state.slots, "건너뛴 회차는 상태를 만들지 않는다"
+
+
+@responses.activate
+def test_skipped_slots_are_not_counted_as_failures(tmp_path: Path) -> None:
+    responses.add(responses.POST, GRAPHQL_URL, json=payload())
+    entry = monitor_entry(
+        targets=[
+            {"date": "2026-08-29", "times": ["14:30"]},
+            {"date": "2026-08-30", "times": ["14:30"]},
+        ]
+    )
+    client = NaverBookingClient(sleep=lambda _: None)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        outcome = check_once(
+            write_config(tmp_path, [entry]), State(), client=client, notifier=notifier,
+            now=NOW, should_continue=lambda: False,
+        )
+    finally:
+        client.close()
+        notifier.close()
+
+    assert (outcome.slots_checked, outcome.slots_failed, outcome.slots_skipped) == (0, 0, 2)
+    assert len(responses.calls) == 0
+
+
+@responses.activate
+def test_no_limit_when_should_continue_is_absent(tmp_path: Path) -> None:
+    responses.add(responses.POST, GRAPHQL_URL, json=payload())
+    entry = monitor_entry(
+        targets=[
+            {"date": "2026-08-29", "times": ["14:30"]},
+            {"date": "2026-08-30", "times": ["14:30"]},
+        ]
+    )
+    outcome = run(write_config(tmp_path, [entry]), State())
+    assert outcome.slots_checked == 2
+    assert outcome.slots_skipped == 0
+
+
+@responses.activate
 def test_outcome_reports_active_counts(tmp_path: Path) -> None:
     responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=0))
     entries = [monitor_entry(), monitor_entry(id="off", enabled=False)]

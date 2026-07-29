@@ -45,6 +45,11 @@ MAX_LOOP_MINUTES = 350.0
 MIN_INTERVAL_SEC = 30.0
 #: 종료 신호에 빠르게 반응하려고 대기를 이 간격으로 쪼갠다.
 SLEEP_STEP_SEC = 1.0
+#: 모든 회차가 이만큼 연속으로 실패하면 감시가 멈춘 것으로 보고 알린다.
+#:
+#: 조회 간격이 70~90초이므로 5회는 약 6~8분이다. 일시적 오류는 넘기고 지속되는
+#: 장애만 잡는 값이다. 알림은 임계값에 도달한 회차에만 한 번 보낸다.
+OUTAGE_ALERT_ITERATIONS = 5
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,8 @@ class CheckOutcome:
     slots_checked: int
     slots_failed: int
     notifications_sent: int
+    #: 종료 시각이 임박해 시작하지 않은 회차. 조회 실패가 아니다.
+    slots_skipped: int = 0
 
 
 def should_send_heartbeat(last_sent: date | None, now: datetime) -> bool:
@@ -76,15 +83,24 @@ def check_once(
     client: NaverBookingClient,
     notifier: Notifier,
     now: datetime,
+    should_continue: Callable[[], bool] | None = None,
 ) -> CheckOutcome:
-    """활성 대상을 한 번 조회하고 상태를 갱신한다. `state`를 제자리에서 바꾼다."""
+    """활성 대상을 한 번 조회하고 상태를 갱신한다. `state`를 제자리에서 바꾼다.
+
+    `should_continue`가 False를 돌려주면 남은 그룹을 시작하지 않는다. 대상이 많을 때
+    한 회차가 종료 시각을 넘겨 상태 저장과 연결 실행 예산을 먹는 것을 막는다.
+    """
     monitors = active_monitors(config, now)
     schedule_requests = group_schedule_requests(monitors)
     slots_active = sum(len(request.slots) for request in schedule_requests)
 
-    checked = failed = notified = 0
+    checked = failed = notified = skipped = 0
 
-    for request in schedule_requests:
+    for index, request in enumerate(schedule_requests):
+        if should_continue is not None and not should_continue():
+            skipped = sum(len(r.slots) for r in schedule_requests[index:])
+            logger.error("종료 시각이 임박해 남은 회차 %d건을 시작하지 않는다", skipped)
+            break
         schedule, error = _fetch(client, request.identifiers, request.date, request.slots)
         for monitor, target_time in request.slots:
             checked += 1
@@ -103,7 +119,11 @@ def check_once(
             notified += int(sent)
 
     if slots_active and should_send_heartbeat(state.heartbeat_last_sent, now):
-        if notifier.notify_heartbeat(len(monitors), slots_active, latest_success(state)):
+        # 이번 회차에서 조회한 것이 전부 실패했으면 '정상 작동 중'이라고 말하지 않는다.
+        degraded = checked > 0 and failed == checked
+        if notifier.notify_heartbeat(
+            len(monitors), slots_active, latest_success(state), degraded=degraded
+        ):
             state.heartbeat_last_sent = now.date()
 
     return CheckOutcome(
@@ -112,6 +132,7 @@ def check_once(
         slots_checked=checked,
         slots_failed=failed,
         notifications_sent=notified,
+        slots_skipped=skipped,
     )
 
 
@@ -232,6 +253,8 @@ class LoopSettings:
 class LoopResult:
     iterations: int
     stopped_reason: str
+    #: 종료 시점의 연속 전면 실패 회차 수. 0이면 마지막 조회는 일부라도 성공했다.
+    consecutive_all_failed: int = 0
 
 
 def loop_settings_from_env(env: Mapping[str, str]) -> LoopSettings:
@@ -310,6 +333,7 @@ def run_loop(
 
     iterations = 0
     reason = "deadline"
+    all_failed_streak = 0
 
     while True:
         if should_stop():
@@ -322,7 +346,14 @@ def run_loop(
 
         iterations += 1
         try:
-            outcome = check_once(config, state, client=client, notifier=notifier, now=now)
+            outcome = check_once(
+                config,
+                state,
+                client=client,
+                notifier=notifier,
+                now=now,
+                should_continue=lambda: now_fn() < deadline,
+            )
         except StateError:
             raise  # 상태 파일을 쓸 수 없는 것은 치명적 오류다.
         except Exception:
@@ -338,6 +369,26 @@ def run_loop(
             logger.info("활성 대상 없음 — 루프를 종료한다")
             reason = "no_active_targets"
             break
+
+        # 전면 실패가 이어지면 감시가 멈춘 것이다. job은 실패시키지 않는다 —
+        # 실패시키면 연결 실행이 끊기고 지연이 큰 cron에 복구를 맡기게 된다.
+        # 대신 사용자에게 알려서 보이게 만든다.
+        if outcome.slots_checked > 0 and outcome.slots_failed == outcome.slots_checked:
+            all_failed_streak += 1
+            if all_failed_streak == OUTAGE_ALERT_ITERATIONS:
+                logger.error(
+                    "모든 회차가 %d회 연속 실패했다 - 감시가 사실상 멈춘 상태다",
+                    all_failed_streak,
+                )
+                notifier.notify_outage(
+                    consecutive_iterations=all_failed_streak,
+                    slots=outcome.slots_checked,
+                    last_success_at=latest_success(state),
+                    detected_at=now,
+                )
+        else:
+            all_failed_streak = 0
+
         if outcome.notifications_sent:
             # 작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
             save_state(state_path, state, now)
@@ -349,12 +400,17 @@ def run_loop(
 
     written = save_state(state_path, state, now_fn())
     logger.info(
-        "루프 종료: iterations=%d reason=%s state=%s",
+        "루프 종료: iterations=%d reason=%s state=%s all_failed_streak=%d",
         iterations,
         reason,
         "saved" if written else "unchanged",
+        all_failed_streak,
     )
-    return LoopResult(iterations=iterations, stopped_reason=reason)
+    return LoopResult(
+        iterations=iterations,
+        stopped_reason=reason,
+        consecutive_all_failed=all_failed_streak,
+    )
 
 
 def _remaining(deadline: datetime, now_fn: Callable[[], datetime]) -> float:

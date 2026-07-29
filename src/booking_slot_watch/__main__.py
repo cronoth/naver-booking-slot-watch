@@ -38,6 +38,7 @@ COMMANDS: dict[str, str] = {
     "monitor": "장시간 반복 감시 루프",
     "has-active-targets": "활성 대상 존재 여부를 exit code로 반환",
     "send-test-notification": "ntfy 테스트 알림 전송",
+    "send-ops-alert": "운영 경고를 ntfy로 전송 (워크플로 셸에서 사용)",
 }
 
 logger = logging.getLogger("booking_slot_watch")
@@ -49,10 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
         description="네이버 예약 회차 잔여석 감시 및 ntfy 알림",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+    created: dict[str, argparse.ArgumentParser] = {}
     for name, help_text in COMMANDS.items():
         sub = subparsers.add_parser(name, help=help_text)
         sub.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="설정 파일 경로")
         sub.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH, help="상태 파일 경로")
+        created[name] = sub
+    created["send-ops-alert"].add_argument("--message", required=True, help="보낼 경고 문구")
     return parser
 
 
@@ -79,6 +83,8 @@ def _dispatch(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         return _has_active_targets(args.config)
     if args.command == "send-test-notification":
         return _send_test_notification(env)
+    if args.command == "send-ops-alert":
+        return _send_ops_alert(args.message, env)
     if args.command == "check-once":
         return _check_once(args.config, args.state, env)
     if args.command == "monitor":
@@ -119,6 +125,22 @@ def _send_test_notification(env: Mapping[str, str]) -> int:
     finally:
         notifier.close()
     logger.info("테스트 알림 전송 성공")
+    return EXIT_OK
+
+
+def _send_ops_alert(message: str, env: Mapping[str, str]) -> int:
+    """워크플로 셸에서 사용자에게 알릴 때 쓴다.
+
+    상태 푸시가 최종 실패하면 워크플로 경고만 남아 아무도 모른다. 그 공백을 메운다.
+    """
+    notifier = Notifier(ntfy_config_from_env(env))
+    try:
+        if not notifier.notify_ops(message):
+            logger.error("운영 경고 전송 실패")
+            return EXIT_RUNTIME_ERROR
+    finally:
+        notifier.close()
+    logger.info("운영 경고 전송 성공")
     return EXIT_OK
 
 

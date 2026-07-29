@@ -230,6 +230,50 @@ def test_send_test_notification_fails_on_rejection(tmp_path: Path) -> None:
     assert cli(tmp_path, "send-test-notification", write_config(tmp_path)) == EXIT_RUNTIME_ERROR
 
 
+# --- send-ops-alert -------------------------------------------------------
+#
+# 워크플로 셸이 사용자에게 알릴 통로. 상태 푸시가 최종 실패하면 워크플로 경고만
+# 남아 아무도 모르므로, 이 명령으로 ntfy까지 보낸다.
+
+
+@responses.activate
+def test_send_ops_alert_sends_the_message(tmp_path: Path) -> None:
+    responses.add(responses.POST, NTFY_URL, json={})
+
+    code = main(
+        ["send-ops-alert", "--message", "상태 푸시 실패 — 중복 알림 가능",
+         "--config", str(write_config(tmp_path)), "--state", str(tmp_path / "state.json")]
+    )
+
+    assert code == EXIT_OK
+    body = (responses.calls[0].request.body or b"").decode("utf-8")
+    assert body == "상태 푸시 실패 — 중복 알림 가능"
+
+
+@responses.activate
+def test_send_ops_alert_fails_when_ntfy_rejects(tmp_path: Path) -> None:
+    responses.add(responses.POST, NTFY_URL, json={}, status=403)
+    code = main(["send-ops-alert", "--message", "x", "--config", str(write_config(tmp_path))])
+    assert code == EXIT_RUNTIME_ERROR
+
+
+def test_send_ops_alert_needs_a_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    code = main(["send-ops-alert", "--message", "x", "--config", str(write_config(tmp_path))])
+    assert code == EXIT_CONFIG_ERROR
+
+
+def test_send_ops_alert_requires_a_message() -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["send-ops-alert"])
+    assert exc.value.code == 2
+
+
+def test_message_option_is_only_on_the_ops_command() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["check-once", "--message", "x"])
+
+
 def test_send_test_notification_needs_a_topic(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

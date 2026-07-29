@@ -62,7 +62,16 @@ jobs:
 
       - name: Commit state
         if: always()
+        env:
+          # 상태를 남기지 못하면 사용자에게 알려야 한다. 워크플로 경고만으로는
+          # 아무도 모르고, 다음 실행이 이전 상태로 시작해 중복 알림이 날 수 있다.
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER_URL: ${{ secrets.NTFY_SERVER_URL }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
         run: |
+          alert() {
+            uv run booking-slot-watch send-ops-alert --message "$1" || true
+          }
           if [ ! -f state/availability.json ]; then
             echo "상태 파일이 없다 - 커밋할 것이 없다"
             exit 0
@@ -83,6 +92,7 @@ jobs:
             if ! git pull --rebase --autostash origin main; then
               git rebase --abort || true
               echo "::warning::상태 파일 rebase 충돌 - 푸시하지 않고 종료한다"
+              alert "상태 저장 실패 — rebase 충돌. 다음 실행이 이전 상태로 시작. 중복 알림 가능"
               exit 0
             fi
             if git push origin HEAD:main; then
@@ -91,6 +101,7 @@ jobs:
             echo "푸시 경합 ($attempt/2) - 원격을 다시 받아 재시도한다"
           done
           echo "::warning::상태 푸시 실패 - 다음 실행이 원격 상태로 시작한다"
+          alert "상태 저장 실패 — 푸시 2회 실패. 다음 실행이 이전 상태로 시작. 중복 알림 가능"
 
       - name: Trigger next run
         if: ${{ success() }}

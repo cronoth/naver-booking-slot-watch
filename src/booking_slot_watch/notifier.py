@@ -141,30 +141,45 @@ class Notifier:
                 f"대상: {slot}",
                 f"오류: {error}",
                 f"확인 시각: {failed_at.strftime(_TIME_FORMAT)}",
-                "이전 상태를 유지했습니다.",
+                "이전 상태: 유지",
             )
         )
         return self._publish(
             topic=self.config.topic,
-            title=f"[{monitor_name}] 조회 실패 {consecutive_errors}회 연속",
+            title=f"[{monitor_name}] 조회 실패 — {consecutive_errors}회 연속",
             message=message,
             priority=PRIORITY_ERROR,
             tags=TAGS_ERROR,
         )
 
     def notify_heartbeat(
-        self, active_monitors: int, active_slots: int, last_success_at: datetime | None
+        self,
+        active_monitors: int,
+        active_slots: int,
+        last_success_at: datetime | None,
+        *,
+        degraded: bool = False,
     ) -> bool:
-        last_seen = (
-            last_success_at.strftime(_TIME_FORMAT) if last_success_at is not None else "없음"
-        )
+        """일일 생존 알림.
+
+        `degraded`면 '정상 작동 중'이라고 말하지 않는다. 전면 장애 중에 정상이라고
+        알리면 감시가 멈춘 것을 아무도 모른다.
+        """
         message = "\n".join(
             (
                 f"활성 모니터 수: {active_monitors}",
                 f"활성 회차 수: {active_slots}",
-                f"최근 정상 조회: {last_seen}",
+                f"최근 정상 조회: {_format_time(last_success_at)}",
             )
         )
+        if degraded:
+            return self._publish(
+                topic=self.config.heartbeat_topic or self.config.topic,
+                title="Naver Booking Slot Watch 조회 실패 중",
+                message=message,
+                priority=PRIORITY_ERROR,
+                tags=TAGS_ERROR,
+            )
         return self._publish(
             topic=self.config.heartbeat_topic or self.config.topic,
             title="Naver Booking Slot Watch 정상 작동 중",
@@ -173,11 +188,47 @@ class Notifier:
             tags=TAGS_HEARTBEAT,
         )
 
+    def notify_outage(
+        self,
+        *,
+        consecutive_iterations: int,
+        slots: int,
+        last_success_at: datetime | None,
+        detected_at: datetime,
+    ) -> bool:
+        """모든 회차가 연속으로 실패할 때 한 번 보낸다. 감시가 사실상 멈춘 상태다."""
+        message = "\n".join(
+            (
+                f"연속 실패: {consecutive_iterations}회",
+                f"대상 회차: {slots}개",
+                f"최근 정상 조회: {_format_time(last_success_at)}",
+                f"확인 시각: {detected_at.strftime(_TIME_FORMAT)}",
+                "점검: Actions 로그의 error= 값",
+            )
+        )
+        return self._publish(
+            topic=self.config.topic,
+            title="Naver Booking Slot Watch 감시 중단",
+            message=message,
+            priority=PRIORITY_AVAILABLE,
+            tags=TAGS_ERROR,
+        )
+
+    def notify_ops(self, message: str) -> bool:
+        """운영 경고. 워크플로 셸에서 사용자에게 알려야 할 때 쓴다."""
+        return self._publish(
+            topic=self.config.topic,
+            title="Naver Booking Slot Watch 운영 경고",
+            message=message,
+            priority=PRIORITY_ERROR,
+            tags=TAGS_ERROR,
+        )
+
     def send_test(self) -> bool:
         return self._publish(
             topic=self.config.topic,
-            title="Naver Booking Slot Watch 테스트 알림",
-            message="ntfy 설정이 정상입니다.",
+            title="Naver Booking Slot Watch 테스트",
+            message="ntfy 설정: 정상",
             priority=PRIORITY_ERROR,
             tags=TAGS_HEARTBEAT,
         )
@@ -218,6 +269,10 @@ class Notifier:
             logger.warning("ntfy 전송 실패: HTTP %d", response.status_code)
             return False
         return True
+
+
+def _format_time(moment: datetime | None) -> str:
+    return moment.strftime(_TIME_FORMAT) if moment is not None else "없음"
 
 
 def _status_label(status: SlotStatus | None) -> str:

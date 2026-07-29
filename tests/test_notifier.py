@@ -10,6 +10,8 @@ import responses
 
 from booking_slot_watch.notifier import (
     DEFAULT_SERVER_URL,
+    PRIORITY_AVAILABLE,
+    PRIORITY_HEARTBEAT,
     Notifier,
     NotifierConfigError,
     NtfyConfig,
@@ -208,12 +210,12 @@ def test_error_notification_content() -> None:
 
     assert sent is True
     request = responses.calls[0].request
-    assert decode_title(request.headers["Title"]) == "[8월 29일 예약] 조회 실패 3회 연속"
+    assert decode_title(request.headers["Title"]) == "[8월 29일 예약] 조회 실패 — 3회 연속"
     assert request.headers["Tags"] == "warning"
     body = (request.body or b"").decode("utf-8")
     assert "대상: 2026-08-29 14:30" in body
     assert "오류: rate_limited" in body
-    assert "이전 상태를 유지" in body
+    assert "이전 상태: 유지" in body
 
 
 # --- Heartbeat -----------------------------------------------------------
@@ -253,6 +255,64 @@ def test_heartbeat_without_any_successful_check() -> None:
     responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
     Notifier(CONFIG).notify_heartbeat(1, 1, None)
     assert "최근 정상 조회: 없음" in (responses.calls[0].request.body or b"").decode("utf-8")
+
+
+@responses.activate
+def test_heartbeat_tells_the_truth_when_every_check_is_failing() -> None:
+    """전면 장애 중에 '정상 작동 중'이라고 알리면 감시 도구로서 최악이다."""
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    Notifier(CONFIG).notify_heartbeat(1, 3, CHECKED_AT, degraded=True)
+
+    request = responses.calls[0].request
+    title = decode_title(request.headers["Title"])
+    body = (request.body or b"").decode("utf-8")
+    assert "정상 작동 중" not in title
+    assert title == "Naver Booking Slot Watch 조회 실패 중"
+    assert "최근 정상 조회: 2026-07-28 14:30:12 KST" in body
+    assert request.headers["Priority"] != PRIORITY_HEARTBEAT, "열화 상태는 우선순위를 올린다"
+
+
+@responses.activate
+def test_heartbeat_stays_normal_when_checks_succeed() -> None:
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    Notifier(CONFIG).notify_heartbeat(1, 3, CHECKED_AT, degraded=False)
+    title = decode_title(responses.calls[0].request.headers["Title"])
+    assert title == "Naver Booking Slot Watch 정상 작동 중"
+
+
+@responses.activate
+def test_outage_notification_content() -> None:
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    sent = Notifier(CONFIG).notify_outage(
+        consecutive_iterations=5, slots=3, last_success_at=CHECKED_AT, detected_at=CHECKED_AT
+    )
+
+    assert sent is True
+    request = responses.calls[0].request
+    assert decode_title(request.headers["Title"]) == "Naver Booking Slot Watch 감시 중단"
+    assert request.headers["Priority"] == PRIORITY_AVAILABLE, "감시가 멈춘 상태는 높은 우선순위"
+    body = (request.body or b"").decode("utf-8")
+    assert "연속 실패: 5회" in body
+    assert "대상 회차: 3개" in body
+    assert "최근 정상 조회: 2026-07-28 14:30:12 KST" in body
+
+
+@responses.activate
+def test_outage_notification_without_any_prior_success() -> None:
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    Notifier(CONFIG).notify_outage(
+        consecutive_iterations=5, slots=1, last_success_at=None, detected_at=CHECKED_AT
+    )
+    assert "최근 정상 조회: 없음" in (responses.calls[0].request.body or b"").decode("utf-8")
+
+
+@responses.activate
+def test_ops_alert_is_sent() -> None:
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    assert Notifier(CONFIG).notify_ops("상태 푸시 실패 - 중복 알림 가능") is True
+    request = responses.calls[0].request
+    assert "운영 경고" in decode_title(request.headers["Title"])
+    assert "상태 푸시 실패" in (request.body or b"").decode("utf-8")
 
 
 @responses.activate

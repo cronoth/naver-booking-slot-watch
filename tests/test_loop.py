@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timedelta
+from email.header import decode_header
 from pathlib import Path
 from typing import Any
 
@@ -17,13 +18,14 @@ from booking_slot_watch.monitor import (
     MAX_LOOP_MINUTES,
     MIN_INTERVAL_SEC,
     MIN_LOOP_MINUTES,
+    OUTAGE_ALERT_ITERATIONS,
     SLEEP_STEP_SEC,
     LoopSettings,
     loop_settings_from_env,
     next_interval,
     run_loop,
 )
-from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverBookingClient
+from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverApiError, NaverBookingClient
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
 from booking_slot_watch.state import State, StateError, load_state
 
@@ -111,6 +113,24 @@ def run(
     finally:
         client.close()
         notifier.close()
+
+
+def ntfy_calls() -> list[Any]:
+    return [c for c in responses.calls if c.request.url.startswith(DEFAULT_SERVER_URL)]
+
+
+def ntfy_titles() -> list[str]:
+    """발송된 알림 제목을 RFC 2047 디코딩해서 돌려준다."""
+    titles = []
+    for call in ntfy_calls():
+        raw = call.request.headers.get("Title", "")
+        text, charset = decode_header(raw)[0]
+        titles.append(text.decode(charset) if isinstance(text, bytes) else text)
+    return titles
+
+
+def outage_alerts() -> list[str]:
+    return [t for t in ntfy_titles() if "감시 중단" in t]
 
 
 def settings(seconds: float, *, interval: float = 70.0, jitter: float = 0.0) -> LoopSettings:
@@ -344,6 +364,60 @@ def test_changed_remaining_is_written(tmp_path: Path) -> None:
     assert load_state(path).slots["event:2026-08-29:14:30"].status == "available"
 
 
+def test_loop_stops_a_slow_iteration_from_eating_the_handoff_budget(tmp_path: Path) -> None:
+    """조회가 느려 종료 시각을 넘기면 남은 그룹을 시작하지 않아야 한다."""
+    clock = FakeClock(START)
+
+    class SlowClient:
+        """조회 한 번에 가상 시간 100초를 쓴다."""
+
+        def __init__(self) -> None:
+            self.dates: list[Any] = []
+
+        def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
+            self.dates.append(target_date)
+            clock.current += timedelta(seconds=100)
+            raise NaverApiError("느림", kind="timeout")
+
+        def close(self) -> None:
+            pass
+
+    entry = {
+        "id": "event",
+        "name": "8월 29일 예약",
+        "enabled": True,
+        "url": URL,
+        "targets": [
+            {"date": "2026-08-29", "times": ["14:30"]},
+            {"date": "2026-08-30", "times": ["14:30"]},
+            {"date": "2026-08-31", "times": ["14:30"]},
+        ],
+        "expires_at": "2099-01-01T17:00:00+09:00",
+    }
+    path = tmp_path / "monitors.json"
+    path.write_text(json.dumps({"version": 1, "monitors": [entry]}, ensure_ascii=False), "utf-8")
+    config = load_config(path)
+
+    client = SlowClient()
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            config,
+            State(),
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings(150),  # 150초 예산: 두 번째 조회 후 초과
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert len(client.dates) == 2, f"세 번째 그룹까지 돌면 예산을 넘긴다 (실제 {client.dates})"
+
+
 def test_unexpected_exception_does_not_kill_the_loop(tmp_path: Path) -> None:
     """한 회차의 예상 못한 예외가 5시간 30분 job 전체를 죽이면 안 된다."""
 
@@ -405,6 +479,51 @@ def test_state_write_failure_stays_fatal(tmp_path: Path) -> None:
             random_fn=lambda: 0.0,
             should_stop=lambda: True,  # 즉시 종료 저장으로 간다
         )
+
+
+@responses.activate
+def test_sustained_total_failure_alerts_once_and_keeps_the_chain(tmp_path: Path) -> None:
+    """전면 장애를 알리되 job은 실패시키지 않는다.
+
+    실패시키면 연결 실행이 끊기고 지연이 큰 cron에 복구를 맡기게 된다.
+    """
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={})
+    clock = FakeClock(START)
+
+    result = run(write_config(tmp_path), tmp_path, clock=clock, settings=settings(8 * 70))
+
+    assert result.iterations == 8
+    assert result.stopped_reason == "deadline", "장애가 나도 체인은 유지된다"
+    assert result.consecutive_all_failed == 8
+
+    assert len(outage_alerts()) == 1, f"임계값 도달 회차에만 한 번 (실제 {ntfy_titles()})"
+
+
+@responses.activate
+def test_recovery_resets_the_outage_streak(tmp_path: Path) -> None:
+    for _ in range(3):
+        responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(0))
+    responses.add(responses.POST, NTFY_URL, json={})
+    clock = FakeClock(START)
+
+    result = run(write_config(tmp_path), tmp_path, clock=clock, settings=settings(4 * 70))
+
+    assert result.consecutive_all_failed == 0, "성공하면 연속 카운트가 초기화된다"
+
+
+@responses.activate
+def test_no_outage_alert_below_the_threshold(tmp_path: Path) -> None:
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={})
+    clock = FakeClock(START)
+
+    result = run(write_config(tmp_path), tmp_path, clock=clock, settings=settings(3 * 70))
+
+    assert result.consecutive_all_failed == 3
+    assert result.consecutive_all_failed < OUTAGE_ALERT_ITERATIONS
+    assert outage_alerts() == [], "임계값 미달이면 전면 실패 알림은 없다"
 
 
 @responses.activate
