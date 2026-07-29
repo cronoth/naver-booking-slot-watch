@@ -75,15 +75,22 @@ jobs:
             exit 0
           fi
           git commit -m "chore: update monitor state"
-          if ! git pull --rebase origin main; then
-            git rebase --abort || true
-            echo "::warning::상태 파일 rebase 충돌 - 푸시하지 않고 종료한다"
-            exit 0
-          fi
           # 푸시 경합에 져도 job을 실패시키지 않는다. 여기서 실패하면 다음 단계의
           # 연결 실행이 건너뛰어져 최대 5시간 동안 감시가 끊긴다. 상태 기록 하나와
           # 5시간의 공백을 맞바꿀 수는 없다. 중복 알림 가능성은 README에 적어뒀다.
-          git push origin HEAD:main || echo "::warning::상태 푸시 실패 - 다음 실행이 원격 상태로 시작한다"
+          for attempt in 1 2; do
+            # autostash: uv가 추적 파일(uv.lock)을 다시 썼으면 rebase가 거부된다.
+            if ! git pull --rebase --autostash origin main; then
+              git rebase --abort || true
+              echo "::warning::상태 파일 rebase 충돌 - 푸시하지 않고 종료한다"
+              exit 0
+            fi
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "푸시 경합 ($attempt/2) - 원격을 다시 받아 재시도한다"
+          done
+          echo "::warning::상태 푸시 실패 - 다음 실행이 원격 상태로 시작한다"
 
       - name: Trigger next run
         if: ${{ success() }}
