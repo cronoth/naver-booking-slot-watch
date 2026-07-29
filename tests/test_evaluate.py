@@ -12,6 +12,7 @@ from booking_slot_watch.state import (
     evaluate_error,
     evaluate_slot,
     mark_notified,
+    mark_send_failed,
     record_error,
     record_success,
 )
@@ -166,6 +167,25 @@ def test_evaluate_never_marks_notification_as_sent() -> None:
 def test_mark_notified_records_the_sent_amount() -> None:
     result = evaluate(observed(0, notified=None), 3)
     assert mark_notified(result.state).last_notified_remaining == 3
+
+
+def test_mark_send_failed_clears_the_stale_amount() -> None:
+    """매진 상태는 이전에 알린 수량을 그대로 물고 있다. 전송 실패 시 지워야 재시도된다."""
+    sold_out = evaluate(observed(5, notified=5), 0).state
+    assert sold_out.last_notified_remaining == 5, "record_success가 승계하는 것이 정상 동작이다"
+
+    reopened = evaluate(sold_out, 1)
+    assert reopened.should_notify is True
+    assert mark_send_failed(reopened.state).last_notified_remaining is None
+
+
+def test_reopen_with_a_smaller_amount_is_retried_after_a_failed_send() -> None:
+    """5석 알림 성공 → 매진 → 1석 재개방 전송 실패. 낡은 5가 남으면 영구 누락된다."""
+    sold_out = evaluate(observed(5, notified=5), 0).state
+    failed_send = mark_send_failed(evaluate(sold_out, 1).state)
+
+    retried = evaluate(failed_send, 1)
+    assert (retried.should_notify, retried.reason) == (True, "became_available")
 
 
 # --- 조회 실패 판단 ------------------------------------------------------

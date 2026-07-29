@@ -22,6 +22,7 @@ from .state import (
     evaluate_error,
     evaluate_slot,
     mark_notified,
+    mark_send_failed,
     save_state,
     slot_key,
 )
@@ -221,7 +222,10 @@ def _apply_slot(
             checked_at=now,
         )
     # 전송이 확인되지 않으면 알린 것으로 기록하지 않는다. 다음 루프에서 다시 시도한다.
-    state.slots[key] = mark_notified(result.state) if sent else result.state
+    if not result.should_notify:
+        state.slots[key] = result.state
+    else:
+        state.slots[key] = mark_notified(result.state) if sent else mark_send_failed(result.state)
 
     logger.info(
         "monitor=%s date=%s time=%s status=%s remaining=%d notified=%s",

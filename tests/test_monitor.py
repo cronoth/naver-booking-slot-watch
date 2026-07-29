@@ -139,6 +139,39 @@ def test_failed_notification_does_not_mark_the_slot_as_notified(tmp_path: Path) 
 
 
 @responses.activate
+def test_reopen_is_retried_when_the_send_fails_after_an_earlier_success(tmp_path: Path) -> None:
+    """5석 알림 성공 → 매진 → 1석 재개방 전송 실패 → 다시 알린다.
+
+    낡은 `last_notified_remaining=5`가 남으면 다음 조회에서 `1 > 5`가 거짓이라
+    재개방 알림이 영구히 묻힌다. 이 프로젝트가 존재하는 이유가 그 알림 한 통이다.
+    """
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=5))
+    responses.add(responses.POST, NTFY_URL, json={})
+    assert run(config, state).notifications_sent == 1
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=0))
+    run(config, state)
+    assert state.slots["event:2026-08-29:14:30"].status == "sold_out"
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
+    responses.add(responses.POST, NTFY_URL, json={}, status=500)
+    assert run(config, state).notifications_sent == 0
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    outcome = run(config, state)
+
+    assert outcome.notifications_sent == 1, "전송에 성공할 때까지 다시 시도해야 한다"
+    assert state.slots["event:2026-08-29:14:30"].last_notified_remaining == 1
+
+
+@responses.activate
 def test_notification_is_retried_on_the_next_run(tmp_path: Path) -> None:
     responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
     responses.add(responses.POST, NTFY_URL, json={}, status=500)
