@@ -117,20 +117,42 @@ def load_config(path: Path) -> Config:
 
 
 def active_monitors(config: Config, now: datetime) -> tuple[MonitorConfig, ...]:
-    """지금 조회할 가치가 있는 모니터만, 지난 날짜를 걷어낸 상태로 돌려준다."""
-    today = now.astimezone(KST).date()
+    """지금 조회할 가치가 있는 모니터만, 지난 회차를 걷어낸 상태로 돌려준다."""
+    now_kst = now.astimezone(KST)
     active: list[MonitorConfig] = []
     for monitor in config.monitors:
         if not monitor.enabled:
             continue
         if monitor.expires_at is not None and now > monitor.expires_at:
             continue
-        # 지난 날짜는 예약할 수 없다. 계속 조회하면 빈 응답으로 오류만 쌓인다.
-        targets = tuple(target for target in monitor.targets if target.date >= today)
+        targets = tuple(
+            remaining
+            for target in monitor.targets
+            if (remaining := _remaining_target(target, now_kst)) is not None
+        )
         if not targets:
             continue
         active.append(replace(monitor, targets=targets))
     return tuple(active)
+
+
+def _remaining_target(target: SlotTarget, now: datetime) -> SlotTarget | None:
+    """지난 회차를 걷어낸 대상. 남은 시각이 없으면 None.
+
+    지난 날짜는 예약할 수 없고, 계속 조회하면 빈 응답으로 오류만 쌓인다. 오늘도
+    이미 시작된 회차는 같다 — 판매 시스템이 지난 회차 재고를 이상하게 돌려주면
+    참여할 수 없는 회차에 예약 가능 알림이 나간다. 유예 시간은 두지 않는다.
+    """
+    if target.date < now.date():
+        return None
+    if target.date > now.date():
+        return target
+    times = tuple(
+        target_time
+        for target_time in target.times
+        if datetime.combine(target.date, target_time, tzinfo=KST) > now
+    )
+    return SlotTarget(date=target.date, times=times) if times else None
 
 
 def group_schedule_requests(monitors: Iterable[MonitorConfig]) -> tuple[ScheduleRequest, ...]:

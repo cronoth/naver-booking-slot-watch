@@ -341,13 +341,18 @@ def test_active_monitors_skips_disabled(tmp_path: Path) -> None:
     assert active_monitors(config, datetime(2026, 7, 28, 14, 0, tzinfo=KST)) == ()
 
 
+#: 만료 판정만 보려고 대상 시각을 만료 시각(17:00) 뒤로 둔 설정.
+#: 그러지 않으면 지난 회차 제거만으로도 비활성이 되어 만료 판정을 검증하지 못한다.
+LATE_TARGET = [{"date": "2026-08-29", "times": ["23:00"]}]
+
+
 def test_active_monitors_skips_expired(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_config(write_config(tmp_path, monitors=[monitor_dict(targets=LATE_TARGET)]))
     assert active_monitors(config, datetime(2026, 8, 29, 17, 0, 1, tzinfo=KST)) == ()
 
 
 def test_active_monitors_keeps_monitor_before_expiry(tmp_path: Path) -> None:
-    config = load_config(write_config(tmp_path))
+    config = load_config(write_config(tmp_path, monitors=[monitor_dict(targets=LATE_TARGET)]))
     active = active_monitors(config, datetime(2026, 8, 29, 16, 59, tzinfo=KST))
     assert [m.id for m in active] == ["event-20260829"]
 
@@ -389,12 +394,48 @@ def test_past_target_dates_are_dropped(tmp_path: Path) -> None:
     assert [target.date for target in monitor.targets] == [date(2026, 8, 29)]
 
 
-def test_today_is_not_treated_as_past(tmp_path: Path) -> None:
+def test_today_is_kept_while_a_target_time_is_still_ahead(tmp_path: Path) -> None:
     entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00"]}])
     config = load_config(write_config(tmp_path, monitors=[entry]))
 
-    active = active_monitors(config, datetime(2026, 7, 28, 23, 0, tzinfo=KST))
+    active = active_monitors(config, datetime(2026, 7, 28, 10, 59, tzinfo=KST))
     assert [t.date for m in active for t in m.targets] == [date(2026, 7, 28)]
+
+
+def test_past_times_today_are_dropped(tmp_path: Path) -> None:
+    """이미 시작된 회차는 예약할 수 없다. 계속 조회하면 쓸 수 없는 알림과 API 호출만 남는다."""
+    entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00", "14:30", "17:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    (monitor,) = active_monitors(config, datetime(2026, 7, 28, 14, 30, tzinfo=KST))
+
+    times = [t.strftime("%H:%M") for t in monitor.targets[0].times]
+    assert times == ["17:00"], "시작 시각과 같으면 이미 지난 것으로 다룬다"
+
+
+def test_monitor_goes_inactive_when_every_time_today_has_passed(tmp_path: Path) -> None:
+    entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    assert active_monitors(config, datetime(2026, 7, 28, 23, 0, tzinfo=KST)) == ()
+
+
+def test_future_dates_ignore_the_current_time_of_day(tmp_path: Path) -> None:
+    entry = monitor_dict(targets=[{"date": "2026-07-29", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    (monitor,) = active_monitors(config, datetime(2026, 7, 28, 23, 0, tzinfo=KST))
+    assert [t.strftime("%H:%M") for t in monitor.targets[0].times] == ["11:00"]
+
+
+def test_past_time_filtering_uses_korean_time(tmp_path: Path) -> None:
+    """UTC로 비교하면 한국 시각 기준으로 아직 오지 않은 회차를 지난 것으로 버린다."""
+    entry = monitor_dict(targets=[{"date": "2026-07-28", "times": ["11:00"]}])
+    config = load_config(write_config(tmp_path, monitors=[entry]))
+
+    # UTC 2026-07-28 01:00 == KST 10:00. 11:00 회차는 아직 남아 있다.
+    (monitor,) = active_monitors(config, datetime(2026, 7, 28, 1, 0, tzinfo=UTC))
+    assert [t.strftime("%H:%M") for t in monitor.targets[0].times] == ["11:00"]
 
 
 def test_monitor_with_only_past_dates_becomes_inactive(tmp_path: Path) -> None:
