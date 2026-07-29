@@ -13,8 +13,10 @@ from booking_slot_watch.models import Config
 from booking_slot_watch.monitor import (
     DEFAULT_INTERVAL_SEC,
     DEFAULT_JITTER_SEC,
-    DEFAULT_LOOP_HOURS,
+    DEFAULT_LOOP_MINUTES,
+    MAX_LOOP_MINUTES,
     MIN_INTERVAL_SEC,
+    MIN_LOOP_MINUTES,
     SLEEP_STEP_SEC,
     LoopSettings,
     loop_settings_from_env,
@@ -112,43 +114,58 @@ def run(
 
 
 def settings(seconds: float, *, interval: float = 70.0, jitter: float = 0.0) -> LoopSettings:
-    return LoopSettings(interval_sec=interval, jitter_sec=jitter, loop_hours=seconds / 3600)
+    return LoopSettings(interval_sec=interval, jitter_sec=jitter, loop_minutes=seconds / 60)
 
 
 # --- 주기와 지터 ----------------------------------------------------------
 
 
 def test_interval_has_no_jitter_when_disabled() -> None:
-    assert next_interval(LoopSettings(70.0, 0.0, 5.4), lambda: 0.5) == 70.0
+    assert next_interval(LoopSettings(70.0, 0.0, 330.0), lambda: 0.5) == 70.0
 
 
 @pytest.mark.parametrize(("draw", "expected"), [(0.0, 70.0), (0.5, 80.0), (0.999, 89.98)])
 def test_jitter_is_added_on_top_of_the_interval(draw: float, expected: float) -> None:
-    assert next_interval(LoopSettings(70.0, 20.0, 5.4), lambda: draw) == pytest.approx(expected)
+    assert next_interval(LoopSettings(70.0, 20.0, 330.0), lambda: draw) == pytest.approx(expected)
 
 
 def test_documented_defaults() -> None:
     """워크플로가 값을 다시 적지 않으므로 코드 기본값이 유일한 출처다."""
-    assert (DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_LOOP_HOURS) == (70.0, 20.0, 5.4)
+    assert (DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_LOOP_MINUTES) == (70.0, 20.0, 330.0)
 
 
-def test_loop_hours_stays_under_the_runner_job_limit() -> None:
-    """GitHub-hosted 러너의 job 실행 상한은 6시간이다. 설정·커밋·연결 시간도 필요하다."""
-    assert DEFAULT_LOOP_HOURS < 5.75
+def test_default_loop_length_fits_the_workflow_timeout() -> None:
+    """timeout-minutes 350, 플랫폼 job 상한 360분. 설정·커밋·연결 시간도 남겨야 한다."""
+    assert DEFAULT_LOOP_MINUTES <= MAX_LOOP_MINUTES
+    assert MAX_LOOP_MINUTES < 360.0
 
 
 # --- 환경변수 -------------------------------------------------------------
 
 
 def test_loop_settings_defaults() -> None:
-    assert loop_settings_from_env({}) == LoopSettings(70.0, 20.0, 5.4)
+    assert loop_settings_from_env({}) == LoopSettings(70.0, 20.0, 330.0)
 
 
 def test_loop_settings_are_read_from_env() -> None:
     parsed = loop_settings_from_env(
-        {"CHECK_INTERVAL_SEC": "90", "CHECK_JITTER_SEC": "5", "LOOP_HOURS": "5.4"}
+        {"CHECK_INTERVAL_SEC": "90", "CHECK_JITTER_SEC": "5", "LOOP_MINUTES": "300"}
     )
-    assert parsed == LoopSettings(90.0, 5.0, 5.4)
+    assert parsed == LoopSettings(90.0, 5.0, 300.0)
+
+
+@pytest.mark.parametrize("value", ["5.5", "5", "0.5", "9"])
+def test_loop_minutes_rejects_values_below_the_lower_bound(value: str) -> None:
+    """분 단위이므로 5.5는 5분 30초 루프다. 단위를 잘못 넣은 것으로 보고 거부한다."""
+    with pytest.raises(ConfigError):
+        loop_settings_from_env({"LOOP_MINUTES": value})
+    assert MIN_LOOP_MINUTES == 10.0
+
+
+@pytest.mark.parametrize("value", ["351", "360", "600"])
+def test_loop_minutes_rejects_values_past_the_workflow_timeout(value: str) -> None:
+    with pytest.raises(ConfigError):
+        loop_settings_from_env({"LOOP_MINUTES": value})
 
 
 @pytest.mark.parametrize("value", ["5", "10", "0", "-1"])
@@ -164,8 +181,8 @@ def test_short_intervals_are_rejected(value: str) -> None:
     [
         {"CHECK_INTERVAL_SEC": "빠르게"},
         {"CHECK_JITTER_SEC": "-1"},
-        {"LOOP_HOURS": "0"},
-        {"LOOP_HOURS": "많이"},
+        {"LOOP_MINUTES": "0"},
+        {"LOOP_MINUTES": "많이"},
     ],
 )
 def test_invalid_loop_settings_are_rejected(env: dict[str, str]) -> None:
@@ -328,7 +345,7 @@ def test_changed_remaining_is_written(tmp_path: Path) -> None:
 
 
 def test_unexpected_exception_does_not_kill_the_loop(tmp_path: Path) -> None:
-    """한 회차의 예상 못한 예외가 5.4시간 job 전체를 죽이면 안 된다."""
+    """한 회차의 예상 못한 예외가 5시간 30분 job 전체를 죽이면 안 된다."""
 
     class ExplodingClient:
         def __init__(self) -> None:

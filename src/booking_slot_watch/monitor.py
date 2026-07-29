@@ -35,9 +35,12 @@ HEARTBEAT_AFTER_HOUR = 7
 
 DEFAULT_INTERVAL_SEC = 70.0
 DEFAULT_JITTER_SEC = 20.0
-#: GitHub-hosted 러너의 job 실행 상한은 6시간이다. 설정·상태 커밋·연결 트리거에
-#: 쓸 시간을 남긴 값이며, 워크플로는 이 값을 다시 적지 않는다.
-DEFAULT_LOOP_HOURS = 5.4
+#: 루프 길이(분) = 5시간 30분. 워크플로는 이 값을 다시 적지 않는다.
+DEFAULT_LOOP_MINUTES = 330.0
+#: 허용 하한(분). 이보다 작은 값은 단위를 잘못 넣은 것으로 보고 거부한다.
+MIN_LOOP_MINUTES = 10.0
+#: 허용 상한(분). 워크플로 timeout-minutes(350)를 넘으면 루프가 끝나기 전에 job이 죽는다.
+MAX_LOOP_MINUTES = 350.0
 #: 비공식 API를 짧은 주기로 두드리지 않기 위한 하한.
 MIN_INTERVAL_SEC = 30.0
 #: 종료 신호에 빠르게 반응하려고 대기를 이 간격으로 쪼갠다.
@@ -222,7 +225,7 @@ def _missing_reason(schedule: HourlySchedule | None) -> str:
 class LoopSettings:
     interval_sec: float = DEFAULT_INTERVAL_SEC
     jitter_sec: float = DEFAULT_JITTER_SEC
-    loop_hours: float = DEFAULT_LOOP_HOURS
+    loop_minutes: float = DEFAULT_LOOP_MINUTES
 
 
 @dataclass(frozen=True)
@@ -237,12 +240,18 @@ def loop_settings_from_env(env: Mapping[str, str]) -> LoopSettings:
         raise ConfigError(
             f"CHECK_INTERVAL_SEC는 {MIN_INTERVAL_SEC:.0f}초 이상이어야 한다: {interval}"
         )
+    loop_minutes = _float_setting(
+        env, "LOOP_MINUTES", DEFAULT_LOOP_MINUTES, minimum=None, positive=True
+    )
+    if not MIN_LOOP_MINUTES <= loop_minutes <= MAX_LOOP_MINUTES:
+        raise ConfigError(
+            f"LOOP_MINUTES는 분 단위로 {MIN_LOOP_MINUTES:.0f}~{MAX_LOOP_MINUTES:.0f} "
+            f"사이여야 한다: {loop_minutes}"
+        )
     return LoopSettings(
         interval_sec=interval,
         jitter_sec=_float_setting(env, "CHECK_JITTER_SEC", DEFAULT_JITTER_SEC, minimum=0.0),
-        loop_hours=_float_setting(
-            env, "LOOP_HOURS", DEFAULT_LOOP_HOURS, minimum=None, positive=True
-        ),
+        loop_minutes=loop_minutes,
     )
 
 
@@ -291,7 +300,7 @@ def run_loop(
     sleep_fn = sleep if sleep is not None else time_module.sleep
 
     started = now_fn()
-    deadline = started + timedelta(hours=settings.loop_hours)
+    deadline = started + timedelta(minutes=settings.loop_minutes)
     logger.info(
         "루프 시작: 종료 예정 %s 간격 %.0f~%.0f초",
         deadline.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -317,7 +326,7 @@ def run_loop(
         except StateError:
             raise  # 상태 파일을 쓸 수 없는 것은 치명적 오류다.
         except Exception:
-            # 예상 못한 예외 하나로 5.4시간 job을 잃지 않는다. 상태는 그대로 남는다.
+            # 예상 못한 예외 하나로 5시간 30분 job을 잃지 않는다. 상태는 그대로 남는다.
             logger.exception("조회 회차에서 예상 못한 오류 - 루프를 계속한다")
             self_sleep = min(next_interval(settings, random_fn), _remaining(deadline, now_fn))
             if self_sleep <= 0:

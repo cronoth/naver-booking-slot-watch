@@ -8,7 +8,7 @@ GitHub Actions cron은 최소 5분 간격이며 지연될 수 있으므로, 단�
 
 ```text
 Action A 시작
-→ 약 5.4시간 동안 반복 조회
+→ 약 5시간 30분 동안 반복 조회
 → 상태 저장·커밋
 → 활성 대상이 남아 있으면 Action B 수동 트리거
 → Action B가 같은 동작 반복
@@ -52,7 +52,7 @@ concurrency:
 
 자체 연결 실행 과정에서 이전 job과 다음 job이 겹치지 않도록 주의한다.
 
-단, `cancel-in-progress: true`를 모든 이벤트에 적용하면 안 된다. cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧으므로, 복구용 schedule 실행이 정상 동작 중인 job을 자기 종료 시각 24분 전에 매번 취소한다. 그러면 `Trigger next run` 단계가 실제로는 한 번도 실행되지 않고, 설계한 연결 실행 모델이 아니라 5시간마다 재시작하는 모델이 돌아간다.
+단, `cancel-in-progress: true`를 모든 이벤트에 적용하면 안 된다. cron 주기(5시간)가 루프 길이(5시간 30분)보다 짧으므로, 복구용 schedule 실행이 정상 동작 중인 job을 자기 종료 시각 30분 전에 매번 취소한다. 그러면 `Trigger next run` 단계가 실제로는 한 번도 실행되지 않고, 설계한 연결 실행 모델이 아니라 5시간마다 재시작하는 모델이 돌아간다.
 
 schedule은 취소하지 않고 큐에서 기다리게 한다. 체인이 살아 있으면 복구 실행은 그냥 대기하다 교체되고, 체인이 죽었을 때만 실제로 인수한다.
 
@@ -84,7 +84,21 @@ concurrency:
 
 `timeout-minutes: 360`은 GitHub-hosted 러너의 job 실행 상한과 같아서 실제로 발동할 수 없다. 350으로 두어 플랫폼이 죽이기 전에 워크플로가 먼저 정리하게 한다.
 
-## 3. job 구조
+## 3. 시간 예산
+
+세 값은 모두 분 단위로 다뤄서 대소 관계가 바로 읽히게 한다.
+
+| 값 | 분 | 사람이 읽는 형태 | 정하는 곳 |
+|---|---:|---|---|
+| 루프 길이 | 330 | 5시간 30분 | `monitor.py`의 `DEFAULT_LOOP_MINUTES` (환경변수 `LOOP_MINUTES`) |
+| job 강제 종료 | 350 | 5시간 50분 | 워크플로의 `timeout-minutes` |
+| 플랫폼 job 상한 | 360 | 6시간 | GitHub 고정값 |
+
+루프가 끝난 뒤 상태 커밋과 다음 실행 트리거에 쓸 시간이 남아야 하므로 `330 < 350 < 360`을 유지한다. 실측으로 checkout·의존성 설치·상태 커밋·연결 트리거를 합친 오버헤드는 1분 미만이었다.
+
+`LOOP_MINUTES`는 `10`~`350` 범위만 받는다. 분 단위이므로 `5.5`는 5분 30초 루프가 된다. 하한이 그런 값을 설정 오류로 거부한다.
+
+## 4. job 구조
 
 ```yaml
 jobs:
@@ -107,7 +121,7 @@ jobs:
           NTFY_SERVER_URL: ${{ secrets.NTFY_SERVER_URL }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           NTFY_HEARTBEAT_TOPIC: ${{ secrets.NTFY_HEARTBEAT_TOPIC }}
-        # CHECK_INTERVAL_SEC·CHECK_JITTER_SEC·LOOP_HOURS는 여기에 적지 않는다.
+        # CHECK_INTERVAL_SEC·CHECK_JITTER_SEC·LOOP_MINUTES는 여기에 적지 않는다.
         # 코드 기본값(monitor.py)이 유일한 출처다. 두 곳에 적으면 어긋난다.
         run: uv run booking-slot-watch monitor
 

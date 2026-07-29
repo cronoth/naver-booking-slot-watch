@@ -194,7 +194,7 @@ def test_failed_save_keeps_the_previous_file_intact(
 # --- 변화 없으면 다시 쓰지 않는다 -----------------------------------------
 #
 # updated_at과 last_checked_at은 매 조회마다 바뀐다. 그대로 저장하면 파일이
-# 항상 달라 보여서 Actions가 변화 없는 커밋을 5.4시간마다 계속 쌓는다.
+# 항상 달라 보여서 Actions가 변화 없는 커밋을 실행마다 계속 쌓는다.
 
 
 def saved_once(tmp_path: Path) -> tuple[Path, State, str]:

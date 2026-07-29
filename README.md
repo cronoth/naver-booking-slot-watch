@@ -18,7 +18,7 @@
 - 중복 알림 방지
 - 만료 시각이 지나면 자동 중단
 - 일일 Heartbeat로 살아 있음 확인
-- GitHub Actions에서 5.4시간 단위 연결 실행
+- GitHub Actions에서 5시간 30분 단위 연결 실행
 
 ## 하지 않는 것
 
@@ -147,11 +147,11 @@ exit code:
 | `CHECK_INTERVAL_SEC` | `70` | 조회 간격. `30` 미만은 거부한다 |
 | `CHECK_JITTER_SEC` | `20` | 간격에 더할 무작위 지터 |
 | — | — | 이 세 값의 기본값은 `monitor.py`가 유일한 출처다. 워크플로는 다시 적지 않는다 |
-| `LOOP_HOURS` | `5.4` | 한 프로세스가 사는 시간. 러너 job 상한 6시간보다 작아야 한다 |
+| `LOOP_MINUTES` | `330` | 한 프로세스가 사는 시간(분). 5시간 30분. `10`~`350` 범위만 허용 |
 
 ## GitHub Actions 운영
 
-한 job이 약 5.4시간 살아 있으면서 70~90초마다 조회하고, 끝날 때 활성 대상이 남아 있으면 다음 실행을 트리거한다. 체인이 끊기면 5시간 cron이 복구한다. 모든 대상이 만료·비활성이면 연결 실행을 만들지 않고 멈춘다.
+한 job이 약 5시간 30분 살아 있으면서 70~90초마다 조회하고, 끝날 때 활성 대상이 남아 있으면 다음 실행을 트리거한다. 체인이 끊기면 5시간 cron이 복구한다. 모든 대상이 만료·비활성이면 연결 실행을 만들지 않고 멈춘다.
 
 ### Secret 등록
 
@@ -202,7 +202,7 @@ gh workflow disable monitor.yml
 
 `push`만 실행 중인 job을 즉시 취소하고 새 설정으로 다시 시작한다. `schedule`과 `workflow_dispatch`는 취소하지 않고 큐에서 기다린다.
 
-- `schedule`: cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧아서, 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽여 자기 연결 실행이 영원히 일어나지 않는다.
+- `schedule`: cron 주기(5시간)가 루프 길이(5시간 30분)보다 짧아서, 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽여 자기 연결 실행이 영원히 일어나지 않는다.
 - `workflow_dispatch`: 연결 실행이 스스로 dispatch하는 순간 마무리 중인 부모 job이 취소돼, 정상 인계가 모두 이력에 `cancelled`로 남는다. 그러면 진짜 취소와 정상 인계를 구분할 수 없다.
 
 따라서 이력의 `cancelled`는 "설정을 push해서 새 설정으로 재시작했다"는 뜻으로만 읽으면 된다.
@@ -215,7 +215,7 @@ gh workflow disable monitor.yml
 
 ```text
 .github/workflows/
-  monitor.yml            5.4시간 감시 job, 상태 커밋, 다음 실행 연결, cron 복구
+  monitor.yml            5시간 30분 감시 job, 상태 커밋, 다음 실행 연결, cron 복구
   test.yml               ruff / mypy / pytest
 src/booking_slot_watch/
   __main__.py            CLI 진입점과 exit code
