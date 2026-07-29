@@ -24,12 +24,17 @@ permissions:
 
 concurrency:
   group: naver-booking-slot-watch
-  # push는 즉시 취소하고 새 설정으로 다시 시작한다.
+  # push만 즉시 취소한다. 설정·코드가 바뀌면 낡은 설정으로 도는 job을 기다릴
+  # 이유가 없다.
   #
-  # schedule은 취소하지 않고 큐에서 기다린다. cron 주기(5시간)가 LOOP_HOURS(5.4시간)
-  # 보다 짧아서, 취소하면 복구용 cron이 매번 살아 있는 job을 죽이고 자기 연결 실행
-  # 단계가 영원히 실행되지 않는다. 큐에 두면 체인이 죽었을 때만 실제로 인수한다.
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  # schedule은 취소하지 않는다. cron 주기(5시간)가 LOOP_HOURS(5.4시간)보다 짧아서,
+  # 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽이고 자기 연결 실행 단계가
+  # 영원히 실행되지 않는다. 큐에 두면 체인이 죽었을 때만 실제로 인수한다.
+  #
+  # workflow_dispatch도 취소하지 않는다. 연결 실행이 스스로 dispatch하는 순간
+  # 마무리 중인 부모 job이 취소돼, 모든 정상 인계가 이력에 cancelled로 남는다.
+  # 그러면 진짜 취소와 정상 인계를 구분할 수 없다.
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   monitor:

@@ -56,10 +56,14 @@ concurrency:
 
 schedule은 취소하지 않고 큐에서 기다리게 한다. 체인이 살아 있으면 복구 실행은 그냥 대기하다 교체되고, 체인이 죽었을 때만 실제로 인수한다.
 
+`workflow_dispatch`도 취소 대상에서 빼야 한다. 연결 실행이 스스로 dispatch하는 순간 마무리 중인 부모 job이 취소되기 때문이다. 스텝은 모두 성공하고 상태 커밋과 다음 실행 트리거까지 끝난 뒤에 취소되므로 동작에는 문제가 없지만, 정상 인계가 전부 이력에 `cancelled`로 남아 진짜 취소와 구분할 수 없게 된다.
+
+결국 `push`만 즉시 취소한다.
+
 ```yaml
 concurrency:
   group: naver-booking-slot-watch
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 ```
 
 ## 3. job 구조

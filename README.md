@@ -199,7 +199,12 @@ gh workflow disable monitor.yml
 
 ### `concurrency` 동작
 
-`push`는 실행 중인 job을 즉시 취소하고 새 설정으로 다시 시작한다. `schedule`은 취소하지 않고 큐에서 기다린다 — cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧아서, 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽여 자기 연결 실행이 영원히 일어나지 않는다.
+`push`만 실행 중인 job을 즉시 취소하고 새 설정으로 다시 시작한다. `schedule`과 `workflow_dispatch`는 취소하지 않고 큐에서 기다린다.
+
+- `schedule`: cron 주기(5시간)가 `LOOP_HOURS`(5.4시간)보다 짧아서, 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽여 자기 연결 실행이 영원히 일어나지 않는다.
+- `workflow_dispatch`: 연결 실행이 스스로 dispatch하는 순간 마무리 중인 부모 job이 취소돼, 정상 인계가 모두 이력에 `cancelled`로 남는다. 그러면 진짜 취소와 정상 인계를 구분할 수 없다.
+
+따라서 이력의 `cancelled`는 "설정을 push해서 새 설정으로 재시작했다"는 뜻으로만 읽으면 된다.
 
 ### exit code와 워크플로의 관계
 
