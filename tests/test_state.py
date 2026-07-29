@@ -112,6 +112,8 @@ def test_saved_file_matches_documented_shape(tmp_path: Path) -> None:
         "last_notified_remaining",
         "consecutive_errors",
         "last_error",
+        "error_alert_sent",
+        "fingerprint",
     }
 
 
@@ -156,6 +158,22 @@ def test_missing_optional_fields_load_as_none(tmp_path: Path) -> None:
     assert slot.status == "unknown"
     assert slot.last_checked_at is None
     assert slot.last_notified_remaining is None
+    # 나중에 추가된 두 필드. 기존 상태 파일을 그대로 읽어야 한다.
+    assert slot.error_alert_sent is False
+    assert slot.fingerprint is None
+
+
+def test_non_boolean_error_alert_sent_is_a_fatal_error(tmp_path: Path) -> None:
+    path = state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    payload = {
+        "version": STATE_VERSION,
+        "slots": {"k": {"status": "unknown", "error_alert_sent": "yes"}},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StateError):
+        load_state(path)
 
 
 # --- 원자적 저장 ----------------------------------------------------------

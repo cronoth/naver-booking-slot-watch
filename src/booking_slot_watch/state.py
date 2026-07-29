@@ -41,6 +41,13 @@ class SlotState:
     last_notified_remaining: int | None
     consecutive_errors: int
     last_error: str | None
+    #: 조회 실패 알림을 실제로 보냈는지. 임계값 도달 순간에 전송이 실패하면
+    #: 다음 조회는 이미 임계값을 넘어서므로, 이 표시가 없으면 장애를 아무도 모른다.
+    error_alert_sent: bool = False
+    #: 이 상태를 만든 상품의 식별자. 같은 monitor.id로 URL만 바꿨을 때
+    #: 이전 상품의 알림 기록이 새 상품에 적용되는 것을 막는다.
+    #: `None`은 지문을 남기기 전의 상태 파일이며 일치로 취급한다.
+    fingerprint: str | None = None
 
 
 @dataclass
@@ -72,6 +79,10 @@ def record_success(
         last_notified_remaining=previous.last_notified_remaining if previous else None,
         consecutive_errors=0,
         last_error=None,
+        # 정상 조회 한 번으로 오류 누적이 풀리므로 알림 표시도 함께 푼다.
+        # 그러지 않으면 회복 후의 두 번째 장애를 알리지 못한다.
+        error_alert_sent=False,
+        fingerprint=previous.fingerprint if previous else None,
     )
 
 
@@ -150,9 +161,9 @@ def _notification_reason(
 def evaluate_error(
     previous: SlotState | None, error: str, *, error_alert_threshold: int, failed_at: datetime
 ) -> EvaluationResult:
-    """조회 실패를 기록한다. 연속 오류가 임계값에 도달한 그 회차에만 운영 알림을 낸다."""
+    """조회 실패를 기록한다. 연속 오류가 임계값에 닿으면 전송에 성공할 때까지 알림을 낸다."""
     state = record_error(previous, error, failed_at)
-    reached = state.consecutive_errors == error_alert_threshold
+    reached = state.consecutive_errors >= error_alert_threshold and not state.error_alert_sent
     return EvaluationResult(
         state=state,
         should_notify=reached,
@@ -163,6 +174,11 @@ def evaluate_error(
 def mark_notified(slot: SlotState) -> SlotState:
     """알림 전송에 성공한 뒤에만 호출한다."""
     return replace(slot, last_notified_remaining=slot.remaining)
+
+
+def mark_error_alert_sent(slot: SlotState) -> SlotState:
+    """조회 실패 알림 전송에 성공한 뒤에만 호출한다."""
+    return replace(slot, error_alert_sent=True)
 
 
 def mark_send_failed(slot: SlotState) -> SlotState:
@@ -297,7 +313,17 @@ def _parse_slot_state(key: str, raw: Any) -> SlotState:
         last_notified_remaining=_parse_optional_int(key, raw, "last_notified_remaining"),
         consecutive_errors=_parse_optional_int(key, raw, "consecutive_errors") or 0,
         last_error=_parse_optional_str(key, raw, "last_error"),
+        # 두 필드는 나중에 추가됐다. 없으면 기존 상태 파일이므로 기본값으로 읽는다.
+        error_alert_sent=_parse_optional_bool(key, raw, "error_alert_sent") or False,
+        fingerprint=_parse_optional_str(key, raw, "fingerprint"),
     )
+
+
+def _parse_optional_bool(key: str, raw: dict[str, Any], name: str) -> bool | None:
+    value = raw.get(name)
+    if value is None or isinstance(value, bool):
+        return value
+    raise StateError(f"슬롯 {key}의 {name}이 불리언이 아니다: {value!r}")
 
 
 def _parse_optional_int(key: str, raw: dict[str, Any], name: str) -> int | None:

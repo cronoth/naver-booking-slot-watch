@@ -11,6 +11,7 @@ from booking_slot_watch.state import (
     SlotState,
     evaluate_error,
     evaluate_slot,
+    mark_error_alert_sent,
     mark_notified,
     mark_send_failed,
     record_error,
@@ -200,12 +201,25 @@ def test_error_keeps_previous_state_and_stays_silent() -> None:
     assert result.state.consecutive_errors == 1
 
 
-def test_error_alerts_once_when_threshold_is_reached() -> None:
+def test_error_alert_keeps_asking_until_the_send_is_confirmed() -> None:
+    """임계값 도달 순간에만 물으면 그때 전송이 실패하면 장애를 아무도 모른다."""
     slot: SlotState | None = None
     reasons = []
     for _ in range(5):
         result = evaluate_error(slot, "timeout", error_alert_threshold=3, failed_at=T1)
         slot = result.state
+        reasons.append(result.reason)
+    threshold_reached = "error_threshold_reached"
+    assert reasons == [None, None, threshold_reached, threshold_reached, threshold_reached]
+
+
+def test_error_alert_stops_once_the_send_is_recorded() -> None:
+    slot: SlotState | None = None
+    reasons = []
+    for turn in range(5):
+        result = evaluate_error(slot, "timeout", error_alert_threshold=3, failed_at=T1)
+        # 3회차에서 전송에 성공했다고 기록한다.
+        slot = mark_error_alert_sent(result.state) if turn == 2 else result.state
         reasons.append(result.reason)
     assert reasons == [None, None, "error_threshold_reached", None, None]
 
@@ -216,9 +230,11 @@ def test_error_alert_can_fire_again_after_recovery() -> None:
         result = evaluate_error(slot, "timeout", error_alert_threshold=3, failed_at=T1)
         slot = result.state
     assert result.reason == "error_threshold_reached"
+    slot = mark_error_alert_sent(slot)
 
     slot = evaluate(slot, 0).state
     assert slot.consecutive_errors == 0
+    assert slot.error_alert_sent is False, "정상 조회는 알림 표시도 함께 푼다"
 
     reasons = []
     for _ in range(3):

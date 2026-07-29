@@ -138,7 +138,9 @@ state/availability.json
       "last_changed_at": "2026-07-28T13:00:00+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
-      "last_error": null
+      "last_error": null,
+      "error_alert_sent": false,
+      "fingerprint": "12/472710/7804183"
     },
     "event-20260829:2026-08-29:14:00": {
       "status": "available",
@@ -147,7 +149,9 @@ state/availability.json
       "last_changed_at": "2026-07-28T14:30:10+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
-      "last_error": null
+      "last_error": null,
+      "error_alert_sent": false,
+      "fingerprint": "12/472710/7804183"
     }
   },
   "heartbeat": {
@@ -155,6 +159,12 @@ state/availability.json
   }
 }
 ```
+
+`error_alert_sent`는 조회 실패 알림을 실제로 보냈는지다. 임계값에 도달한 순간에만 보내면 그때 ntfy가 실패하면 다음 조회는 이미 임계값을 넘어서서 다시 보내지 않는다. 그래서 `연속 오류 >= 임계값 && !error_alert_sent`이면 계속 시도하고, 전송에 성공한 뒤에만 표시를 남긴다. 정상 조회가 한 번이라도 있으면 `consecutive_errors`와 함께 풀린다.
+
+`fingerprint`는 `businessTypeId/businessId/bizItemId`다. 상태 키에는 상품 식별자가 없어서, 같은 `monitor.id`로 URL만 다른 상품으로 바꾸면 이전 상품의 알림 기록이 새 상품에 적용된다. 지문이 현재 설정과 다르면 그 회차 상태를 초기화한다. `null`은 지문을 남기기 전의 상태 파일이며 일치로 취급한다(배포 직후 중복 알림 방지).
+
+두 필드 모두 없으면 기본값(`false`, `null`)으로 읽으므로 기존 상태 파일을 그대로 이어받는다.
 
 ## 6. 상태 값
 
@@ -172,6 +182,7 @@ available
 - 상태나 수량 변화 시 `last_changed_at` 갱신
 - `consecutive_errors = 0`
 - `last_error = null`
+- `error_alert_sent = false`
 
 ### 조회 실패
 
@@ -219,8 +230,10 @@ heartbeat
 
 - 메모리에서 상태 갱신
 - Action 종료 직전 저장 및 커밋
-- 중요한 상태 전이 또는 알림 직후 로컬 파일 저장 가능
+- 알림 전송 성공 직후 로컬 파일 저장
 - 동일 내용이면 커밋하지 않음
+
+알림 직후 저장은 회차가 끝난 뒤로 미루지 않는다. 상품·날짜 그룹이 여러 개일 때, 뒤 그룹 조회가 재시도·timeout으로 길어지고 그 사이 작업이 취소되면 앞 그룹의 알림 기록이 사라져 다음 실행이 같은 알림을 다시 보낸다. `check_once`는 전송 성공 직후 콜백으로 저장한다.
 
 `updated_at`과 슬롯의 `last_checked_at`은 조회마다 바뀌므로 "동일 내용" 판단에서 제외한다. 포함하면 파일이 항상 달라 보여서 변화 없는 커밋이 계속 쌓인다. `save_state`는 실질 상태가 그대로면 파일을 아예 쓰지 않고 `False`를 돌려주며, 그 결과 `git diff --cached --quiet` 가드가 의도대로 동작한다.
 

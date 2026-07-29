@@ -15,7 +15,7 @@ from booking_slot_watch.config import Config, load_config
 from booking_slot_watch.monitor import check_once, should_send_heartbeat
 from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverBookingClient
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
-from booking_slot_watch.state import State, slot_key
+from booking_slot_watch.state import SlotState, State, slot_key
 
 TOPIC = "topic-for-tests"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -244,6 +244,99 @@ def test_error_alert_fires_at_the_configured_threshold(tmp_path: Path) -> None:
     sent = [run(config, state).notifications_sent for _ in range(4)]
 
     assert sent == [0, 0, 1, 0], "임계값에 도달한 회차에만 운영 알림"
+
+
+@responses.activate
+def test_error_alert_is_retried_until_the_send_succeeds(tmp_path: Path) -> None:
+    """임계값에 도달한 그 회차에만 보내면, 그때 ntfy가 실패하면 장애를 아무도 모른다."""
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={}, status=500)
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+
+    for _ in range(3):
+        run(config, state)
+    assert state.slots["event:2026-08-29:14:30"].consecutive_errors == 3
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={})
+    outcome = run(config, state)
+
+    assert outcome.notifications_sent == 1, "임계값을 넘긴 뒤에도 전송 성공까지 시도해야 한다"
+
+
+@responses.activate
+def test_error_alert_fires_again_after_a_recovery(tmp_path: Path) -> None:
+    """정상 조회가 한 번이라도 있으면 다음 장애에서 다시 알려야 한다."""
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={})
+    for _ in range(3):
+        run(config, state)
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=0))
+    run(config, state)
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    responses.add(responses.POST, NTFY_URL, json={})
+    sent = [run(config, state).notifications_sent for _ in range(3)]
+
+    assert sent == [0, 0, 1]
+
+
+@responses.activate
+def test_changing_the_product_url_resets_the_slot_state(tmp_path: Path) -> None:
+    """같은 id로 URL만 바꾸면 이전 상품의 알림 기록이 새 상품에 적용돼 알림이 누락된다."""
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=5))
+    responses.add(responses.POST, NTFY_URL, json={})
+    state = State()
+    assert run(write_config(tmp_path, [monitor_entry()]), state).notifications_sent == 1
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    outcome = run(write_config(tmp_path, [monitor_entry(url=URL_B)]), state)
+
+    assert outcome.notifications_sent == 1, "다른 상품이면 이전 알림 기록을 쓰지 않는다"
+
+
+@responses.activate
+def test_same_product_keeps_the_slot_state(tmp_path: Path) -> None:
+    """지문이 같으면 초기화하지 않는다. 매 회차 초기화되면 알림이 중복된다."""
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+
+    sent = [run(config, state).notifications_sent for _ in range(3)]
+
+    assert sent == [1, 0, 0]
+
+
+@responses.activate
+def test_legacy_slot_without_a_fingerprint_is_not_reset(tmp_path: Path) -> None:
+    """지문이 없는 기존 상태 파일을 읽어도 배포 직후 알림이 중복되면 안 된다."""
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    legacy = SlotState(
+        status="available",
+        remaining=1,
+        last_checked_at=None,
+        last_changed_at=None,
+        last_notified_remaining=1,
+        consecutive_errors=0,
+        last_error=None,
+    )
+    assert legacy.fingerprint is None
+    state = State(slots={"event:2026-08-29:14:30": legacy})
+
+    outcome = run(write_config(tmp_path, [monitor_entry()]), state)
+
+    assert outcome.notifications_sent == 0
 
 
 @responses.activate
