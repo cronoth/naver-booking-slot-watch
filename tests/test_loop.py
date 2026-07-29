@@ -119,14 +119,14 @@ def ntfy_calls() -> list[Any]:
     return [c for c in responses.calls if c.request.url.startswith(DEFAULT_SERVER_URL)]
 
 
+def _title_of(request: Any) -> str:
+    """RFC 2047로 인코딩된 Title 헤더를 되돌린다."""
+    text, charset = decode_header(request.headers.get("Title", ""))[0]
+    return text.decode(charset or "utf-8") if isinstance(text, bytes) else text
+
+
 def ntfy_titles() -> list[str]:
-    """발송된 알림 제목을 RFC 2047 디코딩해서 돌려준다."""
-    titles = []
-    for call in ntfy_calls():
-        raw = call.request.headers.get("Title", "")
-        text, charset = decode_header(raw)[0]
-        titles.append(text.decode(charset) if isinstance(text, bytes) else text)
-    return titles
+    return [_title_of(call.request) for call in ntfy_calls()]
 
 
 def outage_alerts() -> list[str]:
@@ -322,6 +322,40 @@ def test_state_is_saved_right_after_a_notification(tmp_path: Path) -> None:
 
 
 @responses.activate
+def test_state_is_saved_before_the_next_request_group_starts(tmp_path: Path) -> None:
+    """그룹 1의 알림 기록이 그룹 2 조회를 기다리면 안 된다.
+
+    두 번째 상품 조회가 재시도·timeout으로 길어지고 그 사이 작업이 취소되면
+    첫 알림의 성공 기록이 남지 않아 다음 실행이 같은 알림을 다시 보낸다.
+    """
+    path = tmp_path / "state.json"
+    observed: list[Any] = []
+
+    def graphql(request: Any) -> tuple[int, dict[str, str], str]:
+        params = json.loads(request.body or "")["variables"]["scheduleParams"]
+        if params["startDateTime"].startswith("2026-08-30") and not observed:
+            observed.append(load_state(path).slots.get("event:2026-08-29:14:30"))
+        return 200, {}, json.dumps(payload(1))
+
+    responses.add_callback(
+        responses.POST, GRAPHQL_URL, callback=graphql, content_type="application/json"
+    )
+    responses.add(responses.POST, NTFY_URL, json={})
+    config = write_config(
+        tmp_path,
+        targets=[
+            {"date": "2026-08-29", "times": ["14:30"]},
+            {"date": "2026-08-30", "times": ["14:30"]},
+        ],
+    )
+
+    run(config, tmp_path, clock=FakeClock(START), settings=settings(60))
+
+    assert observed and observed[0] is not None, "두 번째 그룹 시작 전에 저장돼 있어야 한다"
+    assert observed[0].last_notified_remaining == 1
+
+
+@responses.activate
 def test_state_is_saved_even_when_nothing_is_active(tmp_path: Path) -> None:
     config = write_config(tmp_path, expires_at="2020-01-01T00:00:00+09:00")
 
@@ -498,6 +532,59 @@ def test_sustained_total_failure_alerts_once_and_keeps_the_chain(tmp_path: Path)
     assert result.consecutive_all_failed == 8
 
     assert len(outage_alerts()) == 1, f"임계값 도달 회차에만 한 번 (실제 {ntfy_titles()})"
+
+
+@responses.activate
+def test_outage_alert_is_retried_until_the_send_succeeds(tmp_path: Path) -> None:
+    """임계값 회차에만 보내면 그때 ntfy가 실패하면 감시가 멈춘 것을 아무도 모른다."""
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    attempts = {"n": 0}
+
+    def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
+        if "감시 중단" not in _title_of(request):
+            return 200, {}, "{}"
+        attempts["n"] += 1
+        return (500 if attempts["n"] == 1 else 200), {}, "{}"
+
+    responses.add_callback(
+        responses.POST, NTFY_URL, callback=ntfy, content_type="application/json"
+    )
+    clock = FakeClock(START)
+
+    run(write_config(tmp_path), tmp_path, clock=clock, settings=settings(8 * 70))
+
+    assert attempts["n"] == 2, f"실패 1회 + 성공 1회여야 한다 (실제 {attempts['n']})"
+
+
+@responses.activate
+def test_repeated_unexpected_errors_are_reported_as_an_outage(tmp_path: Path) -> None:
+    """코드 버그가 매 회차 반복되면 조회는 0건인데 job은 성공으로 끝나 아무도 모른다."""
+    responses.add(responses.POST, NTFY_URL, json={})
+
+    class ExplodingClient:
+        def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
+            raise RuntimeError("예상 못한 오류")
+
+        def close(self) -> None:
+            pass
+
+    clock = FakeClock(START)
+    result = run_loop(
+        write_config(tmp_path),
+        State(),
+        client=ExplodingClient(),  # type: ignore[arg-type]
+        notifier=Notifier(NtfyConfig(topic=TOPIC)),
+        state_path=tmp_path / "state.json",
+        settings=settings(6 * 70),
+        clock=clock.now,
+        sleep=clock.sleep,
+        random_fn=lambda: 0.0,
+    )
+
+    assert result.iterations == 6
+    assert result.stopped_reason == "deadline", "장애를 알리되 체인은 유지한다"
+    assert result.consecutive_all_failed == 6
+    assert len(outage_alerts()) == 1
 
 
 @responses.activate

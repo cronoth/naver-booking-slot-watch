@@ -7,7 +7,7 @@ import logging
 import random
 import time as time_module
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,10 +17,12 @@ from .models import BookingIdentifiers, Config, MonitorConfig, SlotRequest
 from .naver import HourlySchedule, NaverApiError, NaverBookingClient
 from .notifier import Notifier
 from .state import (
+    SlotState,
     State,
     StateError,
     evaluate_error,
     evaluate_slot,
+    mark_error_alert_sent,
     mark_notified,
     mark_send_failed,
     save_state,
@@ -85,11 +87,15 @@ def check_once(
     notifier: Notifier,
     now: datetime,
     should_continue: Callable[[], bool] | None = None,
+    on_notified: Callable[[], None] | None = None,
 ) -> CheckOutcome:
     """활성 대상을 한 번 조회하고 상태를 갱신한다. `state`를 제자리에서 바꾼다.
 
     `should_continue`가 False를 돌려주면 남은 그룹을 시작하지 않는다. 대상이 많을 때
     한 회차가 종료 시각을 넘겨 상태 저장과 연결 실행 예산을 먹는 것을 막는다.
+
+    `on_notified`는 알림 전송에 성공한 직후 호출한다. 상태 저장을 이 함수가 끝날
+    때까지 미루면, 뒤 그룹 조회가 길어지는 동안 작업이 취소돼 기록이 사라진다.
     """
     monitors = active_monitors(config, now)
     schedule_requests = group_schedule_requests(monitors)
@@ -115,6 +121,7 @@ def check_once(
                 config=config,
                 notifier=notifier,
                 now=now,
+                on_notified=on_notified,
             )
             failed += int(slot_failed)
             notified += int(sent)
@@ -166,10 +173,21 @@ def _apply_slot(
     config: Config,
     notifier: Notifier,
     now: datetime,
+    on_notified: Callable[[], None] | None = None,
 ) -> tuple[bool, bool]:
     """한 회차를 판정하고 필요하면 알린다. `(조회 실패 여부, 전송 성공 여부)`."""
     key = slot_key(monitor.id, target_date, target_time)
+    fingerprint = _fingerprint(monitor.identifiers)
     previous = state.slots.get(key)
+    if previous is not None and previous.fingerprint not in (None, fingerprint):
+        # 같은 id로 URL만 바꾼 경우다. 이전 상품의 알림 기록을 새 상품에 쓰면
+        # 새 상품이 처음부터 예약 가능해도 알림이 누락된다.
+        logger.warning("monitor=%s 상품이 바뀌었다 - 회차 상태를 초기화한다", monitor.id)
+        previous = None
+
+    def store(slot: SlotState) -> None:
+        state.slots[key] = replace(slot, fingerprint=fingerprint)
+
     availability = schedule.find(target_time) if schedule is not None else None
 
     if availability is None:
@@ -177,7 +195,7 @@ def _apply_slot(
         result = evaluate_error(
             previous, failure, error_alert_threshold=config.error_alert_threshold, failed_at=now
         )
-        state.slots[key] = result.state
+        store(result.state)
         logger.info(
             "monitor=%s date=%s time=%s status=%s error=%s consecutive_errors=%d",
             monitor.id,
@@ -197,6 +215,11 @@ def _apply_slot(
             consecutive_errors=result.state.consecutive_errors,
             failed_at=now,
         )
+        # 전송이 확인되지 않으면 표시를 남기지 않는다. 다음 조회에서 다시 시도한다.
+        if sent:
+            store(mark_error_alert_sent(result.state))
+            if on_notified is not None:
+                on_notified()
         return True, sent
 
     # 판매하지 않는 회차는 재고가 남아 있어도 예약할 수 없다.
@@ -223,9 +246,11 @@ def _apply_slot(
         )
     # 전송이 확인되지 않으면 알린 것으로 기록하지 않는다. 다음 루프에서 다시 시도한다.
     if not result.should_notify:
-        state.slots[key] = result.state
+        store(result.state)
     else:
-        state.slots[key] = mark_notified(result.state) if sent else mark_send_failed(result.state)
+        store(mark_notified(result.state) if sent else mark_send_failed(result.state))
+        if sent and on_notified is not None:
+            on_notified()
 
     logger.info(
         "monitor=%s date=%s time=%s status=%s remaining=%d notified=%s",
@@ -237,6 +262,13 @@ def _apply_slot(
         "true" if sent else "false",
     )
     return False, sent
+
+
+def _fingerprint(identifiers: BookingIdentifiers) -> str:
+    """상태가 어느 상품에서 나왔는지 알아보는 지문."""
+    return (
+        f"{identifiers.business_type_id}/{identifiers.business_id}/{identifiers.biz_item_id}"
+    )
 
 
 def _missing_reason(schedule: HourlySchedule | None) -> str:
@@ -338,6 +370,40 @@ def run_loop(
     iterations = 0
     reason = "deadline"
     all_failed_streak = 0
+    outage_alerted = False
+    #: 전면 장애 알림에 넣을 대상 수. 조회에 성공한 마지막 회차의 값이다.
+    last_slots_active = 0
+
+    def saver(at: datetime) -> Callable[[], None]:
+        """알림 직후 저장용 콜백. 회차 시각을 인자로 묶어 루프 변수 포획을 피한다."""
+
+        def save() -> None:
+            save_state(state_path, state, at)
+
+        return save
+
+    def note_blackout(at: datetime) -> None:
+        """이 회차에서 결과를 하나도 얻지 못했다.
+
+        조회가 전부 실패한 경우와 예상 못한 예외로 회차가 통째로 날아간 경우를
+        같이 센다. 둘 다 감시가 사실상 멈춘 상태이고 사용자에게 할 말도 같다.
+        job은 실패시키지 않는다 — 실패시키면 연결 실행이 끊기고 지연이 큰 cron에
+        복구를 맡기게 된다. 대신 알려서 보이게 만든다.
+        """
+        nonlocal all_failed_streak, outage_alerted
+        all_failed_streak += 1
+        if all_failed_streak < OUTAGE_ALERT_ITERATIONS or outage_alerted:
+            return
+        logger.error(
+            "모든 회차가 %d회 연속 실패했다 - 감시가 사실상 멈춘 상태다", all_failed_streak
+        )
+        # 전송이 확인될 때까지 다음 회차에서 다시 시도한다.
+        outage_alerted = notifier.notify_outage(
+            consecutive_iterations=all_failed_streak,
+            slots=last_slots_active,
+            last_success_at=latest_success(state),
+            detected_at=at,
+        )
 
     while True:
         if should_stop():
@@ -357,12 +423,17 @@ def run_loop(
                 notifier=notifier,
                 now=now,
                 should_continue=lambda: now_fn() < deadline,
+                # 작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
+                on_notified=saver(now),
             )
         except StateError:
             raise  # 상태 파일을 쓸 수 없는 것은 치명적 오류다.
         except Exception:
             # 예상 못한 예외 하나로 5시간 30분 job을 잃지 않는다. 상태는 그대로 남는다.
+            # 다만 이 경로가 반복되면 조회가 0건인데 job은 성공으로 끝나므로,
+            # 전면 실패와 같이 세서 장애로 승격시킨다.
             logger.exception("조회 회차에서 예상 못한 오류 - 루프를 계속한다")
+            note_blackout(now)
             self_sleep = min(next_interval(settings, random_fn), _remaining(deadline, now_fn))
             if self_sleep <= 0:
                 break
@@ -374,28 +445,12 @@ def run_loop(
             reason = "no_active_targets"
             break
 
-        # 전면 실패가 이어지면 감시가 멈춘 것이다. job은 실패시키지 않는다 —
-        # 실패시키면 연결 실행이 끊기고 지연이 큰 cron에 복구를 맡기게 된다.
-        # 대신 사용자에게 알려서 보이게 만든다.
+        last_slots_active = outcome.slots_active
         if outcome.slots_checked > 0 and outcome.slots_failed == outcome.slots_checked:
-            all_failed_streak += 1
-            if all_failed_streak == OUTAGE_ALERT_ITERATIONS:
-                logger.error(
-                    "모든 회차가 %d회 연속 실패했다 - 감시가 사실상 멈춘 상태다",
-                    all_failed_streak,
-                )
-                notifier.notify_outage(
-                    consecutive_iterations=all_failed_streak,
-                    slots=outcome.slots_checked,
-                    last_success_at=latest_success(state),
-                    detected_at=now,
-                )
+            note_blackout(now)
         else:
             all_failed_streak = 0
-
-        if outcome.notifications_sent:
-            # 작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
-            save_state(state_path, state, now)
+            outage_alerted = False
 
         remaining = _remaining(deadline, now_fn)
         if remaining <= 0:
