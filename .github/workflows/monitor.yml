@@ -24,16 +24,7 @@ permissions:
 
 concurrency:
   group: naver-booking-slot-watch
-  # push만 즉시 취소한다. 설정·코드가 바뀌면 낡은 설정으로 도는 job을 기다릴
-  # 이유가 없다.
-  #
-  # schedule은 취소하지 않는다. cron 주기(5시간)가 LOOP_HOURS(5.4시간)보다 짧아서,
-  # 취소하게 두면 복구용 cron이 매번 살아 있는 job을 죽이고 자기 연결 실행 단계가
-  # 영원히 실행되지 않는다. 큐에 두면 체인이 죽었을 때만 실제로 인수한다.
-  #
-  # workflow_dispatch도 취소하지 않는다. 연결 실행이 스스로 dispatch하는 순간
-  # 마무리 중인 부모 job이 취소돼, 모든 정상 인계가 이력에 cancelled로 남는다.
-  # 그러면 진짜 취소와 정상 인계를 구분할 수 없다.
+  # push만 취소한다. 근거는 docs/GITHUB_ACTIONS.md의 concurrency 절 참고.
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
@@ -57,9 +48,7 @@ jobs:
           NTFY_SERVER_URL: ${{ secrets.NTFY_SERVER_URL }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           NTFY_HEARTBEAT_TOPIC: ${{ secrets.NTFY_HEARTBEAT_TOPIC }}
-          CHECK_INTERVAL_SEC: "70"
-          CHECK_JITTER_SEC: "20"
-          LOOP_HOURS: "5.4"
+        # 조회 간격·지터·루프 시간은 코드 기본값(monitor.py)이 유일한 출처다.
         run: |
           set +e
           uv run booking-slot-watch monitor

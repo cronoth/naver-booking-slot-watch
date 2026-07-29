@@ -290,7 +290,7 @@ Heartbeat 토픽이 별도로 설정되지 않으면 일반 토픽을 사용한�
 ```text
 CHECK_INTERVAL_SEC=70
 CHECK_JITTER_SEC=20
-LOOP_HOURS=5.5
+LOOP_HOURS=5.4
 ```
 
 5초나 10초와 같은 짧은 주기는 사용하지 않는다.

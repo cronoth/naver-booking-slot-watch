@@ -146,7 +146,8 @@ exit code:
 | `NTFY_HEARTBEAT_TOPIC` | `NTFY_TOPIC` | Heartbeat 전용 토픽 |
 | `CHECK_INTERVAL_SEC` | `70` | 조회 간격. `30` 미만은 거부한다 |
 | `CHECK_JITTER_SEC` | `20` | 간격에 더할 무작위 지터 |
-| `LOOP_HOURS` | `5.5` | 한 프로세스가 사는 시간(워크플로는 `5.4`를 쓴다) |
+| — | — | 이 세 값의 기본값은 `monitor.py`가 유일한 출처다. 워크플로는 다시 적지 않는다 |
+| `LOOP_HOURS` | `5.4` | 한 프로세스가 사는 시간. 러너 job 상한 6시간보다 작아야 한다 |
 
 ## GitHub Actions 운영
 

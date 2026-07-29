@@ -35,7 +35,9 @@ HEARTBEAT_AFTER_HOUR = 7
 
 DEFAULT_INTERVAL_SEC = 70.0
 DEFAULT_JITTER_SEC = 20.0
-DEFAULT_LOOP_HOURS = 5.5
+#: GitHub-hosted 러너의 job 실행 상한은 6시간이다. 설정·상태 커밋·연결 트리거에
+#: 쓸 시간을 남긴 값이며, 워크플로는 이 값을 다시 적지 않는다.
+DEFAULT_LOOP_HOURS = 5.4
 #: 비공식 API를 짧은 주기로 두드리지 않기 위한 하한.
 MIN_INTERVAL_SEC = 30.0
 #: 종료 신호에 빠르게 반응하려고 대기를 이 간격으로 쪼갠다.

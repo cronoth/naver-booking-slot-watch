@@ -119,23 +119,29 @@ def settings(seconds: float, *, interval: float = 70.0, jitter: float = 0.0) -> 
 
 
 def test_interval_has_no_jitter_when_disabled() -> None:
-    assert next_interval(LoopSettings(70.0, 0.0, 5.5), lambda: 0.5) == 70.0
+    assert next_interval(LoopSettings(70.0, 0.0, 5.4), lambda: 0.5) == 70.0
 
 
 @pytest.mark.parametrize(("draw", "expected"), [(0.0, 70.0), (0.5, 80.0), (0.999, 89.98)])
 def test_jitter_is_added_on_top_of_the_interval(draw: float, expected: float) -> None:
-    assert next_interval(LoopSettings(70.0, 20.0, 5.5), lambda: draw) == pytest.approx(expected)
+    assert next_interval(LoopSettings(70.0, 20.0, 5.4), lambda: draw) == pytest.approx(expected)
 
 
 def test_documented_defaults() -> None:
-    assert (DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_LOOP_HOURS) == (70.0, 20.0, 5.5)
+    """워크플로가 값을 다시 적지 않으므로 코드 기본값이 유일한 출처다."""
+    assert (DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_LOOP_HOURS) == (70.0, 20.0, 5.4)
+
+
+def test_loop_hours_stays_under_the_runner_job_limit() -> None:
+    """GitHub-hosted 러너의 job 실행 상한은 6시간이다. 설정·커밋·연결 시간도 필요하다."""
+    assert DEFAULT_LOOP_HOURS < 5.75
 
 
 # --- 환경변수 -------------------------------------------------------------
 
 
 def test_loop_settings_defaults() -> None:
-    assert loop_settings_from_env({}) == LoopSettings(70.0, 20.0, 5.5)
+    assert loop_settings_from_env({}) == LoopSettings(70.0, 20.0, 5.4)
 
 
 def test_loop_settings_are_read_from_env() -> None:

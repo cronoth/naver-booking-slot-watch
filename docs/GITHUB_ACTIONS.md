@@ -8,7 +8,7 @@ GitHub Actions cron은 최소 5분 간격이며 지연될 수 있으므로, 단�
 
 ```text
 Action A 시작
-→ 약 5.5시간 동안 반복 조회
+→ 약 5.4시간 동안 반복 조회
 → 상태 저장·커밋
 → 활성 대상이 남아 있으면 Action B 수동 트리거
 → Action B가 같은 동작 반복
@@ -66,6 +66,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'push' }}
 ```
 
+### 참고 저장소와의 대조
+
+`DuckOnDesk/naver-booking-monitor`의 실제 워크플로와 비교하면 다음이 다르다.
+
+| 항목 | 참고 저장소 | 이 프로젝트 |
+|---|---|---|
+| `cancel-in-progress` | `false` (무조건) | `push`일 때만 |
+| `push.paths` | `.monitor_restart_request` 센티넬 파일 | `monitors.json`, `src/**` 등 |
+| 설정 읽기 | 실행 중 GitHub raw에서 fetch | 시작 시 로컬 체크아웃 1회 |
+| 연결 조건 | `if: ${{ !cancelled() }}` | `if: success()` |
+| `timeout-minutes` | 360 | 350 |
+
+저쪽이 `cancel-in-progress: false`로 단순할 수 있는 것은 설정을 런타임에 원격에서 가져오기 때문이다. 설정이 바뀌어도 재시작할 이유가 없다. 이 프로젝트는 설정을 시작 시 한 번 읽으므로(PROJECT_SPEC 단계 8) 설정 push에는 재시작이 필요하고, 그래서 `push`만 취소하는 조건이 붙는다. 런타임 원격 fetch는 `REFERENCES.md`가 채택 제외로 지정한 항목이다.
+
+`if: ${{ !cancelled() }}`는 채택하지 않는다. 이 프로젝트는 설정 오류에 exit 2로 즉시 종료하므로, 실패해도 연결하면 수십 초 만에 실패하고 다시 트리거하는 폭주 루프가 된다. `if: success()`가 그 안전장치이며, 대신 일시적 실패는 회차별 예외 가드와 상태 보존으로 흡수하고 복구는 cron에 맡긴다.
+
+`timeout-minutes: 360`은 GitHub-hosted 러너의 job 실행 상한과 같아서 실제로 발동할 수 없다. 350으로 두어 플랫폼이 죽이기 전에 워크플로가 먼저 정리하게 한다.
+
 ## 3. job 구조
 
 ```yaml
@@ -89,9 +107,8 @@ jobs:
           NTFY_SERVER_URL: ${{ secrets.NTFY_SERVER_URL }}
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           NTFY_HEARTBEAT_TOPIC: ${{ secrets.NTFY_HEARTBEAT_TOPIC }}
-          CHECK_INTERVAL_SEC: "70"
-          CHECK_JITTER_SEC: "20"
-          LOOP_HOURS: "5.4"
+        # CHECK_INTERVAL_SEC·CHECK_JITTER_SEC·LOOP_HOURS는 여기에 적지 않는다.
+        # 코드 기본값(monitor.py)이 유일한 출처다. 두 곳에 적으면 어긋난다.
         run: uv run booking-slot-watch monitor
 
       - name: Commit state
