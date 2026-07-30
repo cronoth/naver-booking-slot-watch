@@ -440,6 +440,8 @@ def run_loop(
             # 전면 실패와 같이 세서 장애로 승격시킨다.
             logger.exception("조회 회차에서 예상 못한 오류 - 루프를 계속한다")
             note_blackout(now)
+            # 예외 전에 일부 그룹은 끝났을 수 있다. 거기까지는 남긴다.
+            save_state(state_path, state, now)
             self_sleep = min(next_interval(settings, random_fn), _remaining(deadline, now_fn))
             if self_sleep <= 0:
                 break
@@ -457,6 +459,16 @@ def run_loop(
         else:
             all_failed_streak = 0
             outage_alerted = False
+
+        # 회차마다 체크포인트한다. GitHub이 취소할 때 프로세스를 강제 종료하면
+        # 루프 종료 저장이 실행되지 않아, 알림을 동반하지 않는 전이가 통째로 사라진다.
+        # available → sold_out을 잃으면 새 실행이 원격의 available을 읽고, 다시
+        # 같은 수량이 열려도 재개방으로 보지 않아 알림이 누락된다.
+        #
+        # 실질 상태가 그대로면 save_state가 파일을 쓰지 않으므로 매 회차 I/O가
+        # 늘지 않는다. 알림 직후 저장(on_notified)은 그대로 둔다 — 한 회차 안에서
+        # 뒤 그룹이 길어지는 동안 취소되면 이 체크포인트까지 오지 못한다.
+        save_state(state_path, state, now)
 
         remaining = _remaining(deadline, now_fn)
         if remaining <= 0:

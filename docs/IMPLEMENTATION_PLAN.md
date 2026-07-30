@@ -207,7 +207,10 @@ uv run booking-slot-watch monitor
 - 반복 조회
 - 주기와 지터
 - SIGTERM 처리
+- 회차 완료 직후 상태 체크포인트
 - 종료 직전 상태 저장
+
+SIGTERM 처리와 종료 직전 저장에만 의지하지 않는다. GitHub이 실행을 취소할 때 신호 기반 정상 종료를 보장하지 않으므로, 회차마다 체크포인트해야 알림 없는 전이가 살아남는다. 근거는 `docs/CONFIG_AND_STATE.md` 8절.
 
 `monitors.json`은 프로세스 시작 시 한 번 읽어도 된다. GitHub Actions에서는 설정 push가 기존 job을 취소하고 새 job을 시작하도록 구성한다.
 

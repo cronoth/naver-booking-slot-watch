@@ -27,7 +27,7 @@ from booking_slot_watch.monitor import (
 )
 from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverApiError, NaverBookingClient
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
-from booking_slot_watch.state import State, StateError, load_state
+from booking_slot_watch.state import SlotState, State, StateError, load_state
 
 TOPIC = "loop-topic"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -301,8 +301,9 @@ def test_state_is_saved_when_the_loop_ends(tmp_path: Path) -> None:
 def test_state_is_saved_right_after_a_notification(tmp_path: Path) -> None:
     """작업이 취소돼도 '이미 알렸다'는 기록이 남아야 중복 알림을 막는다.
 
-    루프 종료 저장과 구분하려면 루프가 끝나기 **전에** 파일을 확인해야 한다.
-    첫 대기 시점에 이미 기록돼 있어야 한다.
+    첫 대기 시점에 수량까지 기록돼 있는지 본다. 회차 체크포인트만으로도 이 조건은
+    만족하므로 이 테스트는 `on_notified`를 따로 검증하지 않는다 — 그 역할은
+    `test_state_is_saved_before_the_next_request_group_starts`가 한다.
     """
     responses.add(responses.POST, GRAPHQL_URL, json=payload(1))
     responses.add(responses.POST, NTFY_URL, json={})
@@ -353,6 +354,100 @@ def test_state_is_saved_before_the_next_request_group_starts(tmp_path: Path) -> 
 
     assert observed and observed[0] is not None, "두 번째 그룹 시작 전에 저장돼 있어야 한다"
     assert observed[0].last_notified_remaining == 1
+
+
+def notified_available(remaining: int) -> State:
+    """원격에 저장돼 있던 상태: 예약 가능이고 그 수량까지 알림에 성공했다."""
+    return State(
+        slots={
+            "event:2026-08-29:14:30": SlotState(
+                status="available",
+                remaining=remaining,
+                last_checked_at=None,
+                last_changed_at=None,
+                last_notified_remaining=remaining,
+                consecutive_errors=0,
+                last_error=None,
+            )
+        }
+    )
+
+
+@responses.activate
+def test_state_is_checkpointed_after_every_iteration(tmp_path: Path) -> None:
+    """알림을 동반하지 않는 상태 전이도 회차마다 파일에 남아야 한다.
+
+    GitHub이 취소할 때 프로세스를 강제 종료하면 루프 종료 저장이 실행되지 않는다.
+    실제로 취소된 실행의 로그에 `루프 종료:` 줄이 없고 `Commit state`가
+    '상태 변화 없음'으로 끝났다. 알림이 없는 전이는 그대로 유실됐다.
+    """
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(0))
+    path = tmp_path / "state.json"
+    observed: list[Any] = []
+
+    class ObservingClock(FakeClock):
+        def sleep(self, seconds: float) -> None:
+            if not observed:  # 첫 회차 직후, 루프 종료 저장 이전
+                observed.append(load_state(path).slots.get("event:2026-08-29:14:30"))
+            super().sleep(seconds)
+
+    run(
+        write_config(tmp_path),
+        tmp_path,
+        clock=ObservingClock(START),
+        settings=settings(180),
+        state=notified_available(1),
+    )
+
+    assert observed and observed[0] is not None, "회차 직후 파일이 있어야 한다"
+    assert observed[0].status == "sold_out", "알림 없는 전이도 회차 직후 저장돼야 한다"
+
+
+@responses.activate
+def test_reopen_is_detected_after_the_process_is_killed(tmp_path: Path) -> None:
+    """한 회차 완료 직후 강제 종료돼도 다음 실행이 매진 전이를 알고 재개방을 잡아야 한다.
+
+    전이를 잃으면 새 실행이 원격의 `available`/`lnr=1`을 읽고, 다시 1석이 열려도
+    `1 > 1`이 거짓이라 재개방 알림을 보내지 않는다.
+    """
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(0))
+    path = tmp_path / "state.json"
+    snapshot: list[str] = []
+
+    class KillAfterFirstIteration(FakeClock):
+        def sleep(self, seconds: float) -> None:
+            if not snapshot and path.exists():
+                snapshot.append(path.read_text(encoding="utf-8"))
+            super().sleep(seconds)
+
+    run(
+        write_config(tmp_path),
+        tmp_path,
+        clock=KillAfterFirstIteration(START),
+        settings=settings(180),
+        state=notified_available(1),
+    )
+
+    assert snapshot, "첫 회차 직후 체크포인트가 없으면 강제 종료로 전이가 사라진다"
+
+    # 강제 종료된 프로세스가 남긴 파일만 가지고 새 실행이 시작한다.
+    revived = tmp_path / "revived.json"
+    revived.write_text(snapshot[0], encoding="utf-8")
+    resumed = load_state(revived)
+    assert resumed.slots["event:2026-08-29:14:30"].status == "sold_out"
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(1))
+    responses.add(responses.POST, NTFY_URL, json={})
+    run(
+        write_config(tmp_path),
+        tmp_path,
+        clock=FakeClock(START),
+        settings=settings(60),
+        state=resumed,
+    )
+
+    assert any("예약 가능" in title for title in ntfy_titles()), "재개방을 알려야 한다"
 
 
 @responses.activate
