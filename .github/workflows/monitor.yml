@@ -33,12 +33,14 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@v4
+      # 외부 Action은 커밋 SHA로 고정한다. 이 job은 contents:write와 actions:write를
+      # 들고 있어서, 태그가 옮겨지면 그 권한으로 남의 코드가 돈다.
+      # 갱신 방법은 docs/GITHUB_ACTIONS.md 참고.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
-      # 이동식 메이저 태그는 v7까지만 발행돼 있어 릴리스 태그로 고정한다.
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 

@@ -107,11 +107,11 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@<sha> # v4.4.0
         with:
           fetch-depth: 0
 
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@<sha> # v9.0.0
         with:
           enable-cache: true
 
@@ -148,6 +148,21 @@ jobs:
 ```
 
 `uv`가 `.python-version`을 보고 인터프리터를 내려받으므로 워크플로에 파이썬 버전을 적지 않는다.
+
+### 외부 Action은 커밋 SHA로 고정한다
+
+이 job은 `contents: write`와 `actions: write`를 들고 있다. 태그는 옮겨질 수 있으므로, 태그로 실행하면 그 권한으로 남의 코드가 도는 경로가 열린다. 두 Action 모두 전체 커밋 SHA로 고정하고 옆에 버전을 주석으로 남긴다.
+
+버전을 올릴 때 SHA를 구하는 방법:
+
+```powershell
+gh api repos/actions/checkout/git/ref/tags/v4 --jq .object.sha
+gh api repos/astral-sh/setup-uv/git/ref/tags/v9.0.0 --jq .object.sha
+```
+
+`setup-uv`의 이동식 메이저 태그는 v7까지만 발행돼 있어 릴리스 태그(`v9.0.0`)를 기준으로 삼는다. SHA를 고정했으므로 패치가 자동 반영되지 않는다 — 올릴 때는 위 명령으로 새 SHA를 구해 주석의 버전까지 함께 바꾼다.
+
+`checkout`의 인증 정보를 상태 커밋 단계로만 제한하는 것(`persist-credentials: false`)은 하지 않는다. push 단계에서 같은 `GITHUB_TOKEN`을 다시 넣어야 하고 job 권한 자체가 `contents: write`라서, 실질적으로 줄어드는 것 없이 복잡도만 늘어난다.
 
 위 예시는 개념 구조다. 실제 구현에서는 `has-active-targets`가 비활성 상태를 exit code로 표현하도록 정한다.
 
@@ -246,8 +261,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: actions/checkout@<sha> # v4.4.0
+      - uses: astral-sh/setup-uv@<sha> # v9.0.0
         with:
           enable-cache: true
       - run: uv sync --extra dev
