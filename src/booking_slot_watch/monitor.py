@@ -245,12 +245,18 @@ def _apply_slot(
             checked_at=now,
         )
     # 전송이 확인되지 않으면 알린 것으로 기록하지 않는다. 다음 루프에서 다시 시도한다.
-    if not result.should_notify:
-        store(result.state)
-    else:
-        store(mark_notified(result.state) if sent else mark_send_failed(result.state))
-        if sent and on_notified is not None:
+    if sent:
+        store(mark_notified(result.state))
+        if on_notified is not None:
             on_notified()
+    elif result.reason == "became_available":
+        # 낡은 수량이 남으면 재개방 알림이 영구히 묻힌다. 지워서 다시 시도하게 한다.
+        store(mark_send_failed(result.state))
+    else:
+        # 증가 알림 실패에는 과거 알림 수량을 남긴다. 지우면 다음 조회에서 수량이
+        # 줄어도 '재개방'으로 오판해, 이미 알린 것보다 적은 수량을 또 알린다.
+        # 수량이 계속 높으면 증가 조건으로 다시 시도한다.
+        store(result.state)
 
     logger.info(
         "monitor=%s date=%s time=%s status=%s remaining=%d notified=%s",

@@ -172,6 +172,57 @@ def test_reopen_is_retried_when_the_send_fails_after_an_earlier_success(tmp_path
 
 
 @responses.activate
+def test_increase_alert_failure_does_not_notify_on_a_later_decrease(tmp_path: Path) -> None:
+    """증가 알림 실패를 재개방과 같이 다루면, 수량이 줄었을 때 잘못 알린다.
+
+    5석은 이미 알렸으므로 4석은 새 정보가 아니다. 예약 가능 상태에서 감소는
+    알리지 않는다는 계약을 증가 알림 실패가 깨면 안 된다.
+    """
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=5))
+    responses.add(responses.POST, NTFY_URL, json={})
+    assert run(config, state).notifications_sent == 1
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=6))
+    responses.add(responses.POST, NTFY_URL, json={}, status=500)
+    assert run(config, state).notifications_sent == 0
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=4))
+    responses.add(responses.POST, NTFY_URL, json={})
+    outcome = run(config, state)
+
+    assert outcome.notifications_sent == 0, "증가 알림 실패가 감소 알림을 만들어내면 안 된다"
+
+
+@responses.activate
+def test_increase_alert_is_retried_while_the_amount_stays_high(tmp_path: Path) -> None:
+    """수량이 계속 높으면 증가 알림은 다시 시도해야 한다."""
+    config = write_config(tmp_path, [monitor_entry()])
+    state = State()
+
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=5))
+    responses.add(responses.POST, NTFY_URL, json={})
+    run(config, state)
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=6))
+    responses.add(responses.POST, NTFY_URL, json={}, status=500)
+    run(config, state)
+
+    responses.reset()
+    responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=6))
+    responses.add(responses.POST, NTFY_URL, json={})
+    outcome = run(config, state)
+
+    assert outcome.notifications_sent == 1
+    assert state.slots["event:2026-08-29:14:30"].last_notified_remaining == 6
+
+
+@responses.activate
 def test_notification_is_retried_on_the_next_run(tmp_path: Path) -> None:
     responses.add(responses.POST, GRAPHQL_URL, json=payload(remaining_at_1430=1))
     responses.add(responses.POST, NTFY_URL, json={}, status=500)
