@@ -107,7 +107,7 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - uses: actions/checkout@<sha> # v4.4.0
+      - uses: actions/checkout@<sha> # v7.0.1
         with:
           fetch-depth: 0
 
@@ -156,11 +156,13 @@ jobs:
 버전을 올릴 때 SHA를 구하는 방법:
 
 ```powershell
-gh api repos/actions/checkout/git/ref/tags/v4 --jq .object.sha
+gh api repos/actions/checkout/git/ref/tags/v7.0.1 --jq .object.sha
 gh api repos/astral-sh/setup-uv/git/ref/tags/v9.0.0 --jq .object.sha
 ```
 
-`setup-uv`의 이동식 메이저 태그는 v7까지만 발행돼 있어 릴리스 태그(`v9.0.0`)를 기준으로 삼는다. SHA를 고정했으므로 패치가 자동 반영되지 않는다 — 올릴 때는 위 명령으로 새 SHA를 구해 주석의 버전까지 함께 바꾼다.
+이동식 메이저 태그가 아니라 패치까지 붙은 릴리스 태그를 기준으로 삼는다. `setup-uv`는 이동식 태그가 v7까지만 발행돼 있고, `checkout`은 이동식 `v7`이 있지만 어느 패치를 가리키는지 주석에 적을 수 없다. SHA를 고정했으므로 패치가 자동 반영되지 않는다 — 올릴 때는 위 명령으로 새 SHA를 구해 주석의 버전까지 함께 바꾼다.
+
+`checkout`은 v5부터 Node 24 런타임이다. v4를 쓰면 러너가 Node 24로 강제 실행하면서 deprecation 경고를 남긴다. v6부터는 `persist-credentials`가 `.git/config` 대신 `$RUNNER_TEMP`의 별도 파일에 저장되지만, 같은 job에서 `git push`를 쓰는 데는 워크플로 변경이 필요하지 않다(공식 README 명시). Docker container action에서 인증된 git을 쓰는 경우만 러너 v2.329.0 이상을 요구하는데, 이 프로젝트는 job 셸에서 직접 git을 쓴다.
 
 `checkout`의 인증 정보를 상태 커밋 단계로만 제한하는 것(`persist-credentials: false`)은 하지 않는다. push 단계에서 같은 `GITHUB_TOKEN`을 다시 넣어야 하고 job 권한 자체가 `contents: write`라서, 실질적으로 줄어드는 것 없이 복잡도만 늘어난다.
 
@@ -261,7 +263,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@<sha> # v4.4.0
+      - uses: actions/checkout@<sha> # v7.0.1
       - uses: astral-sh/setup-uv@<sha> # v9.0.0
         with:
           enable-cache: true

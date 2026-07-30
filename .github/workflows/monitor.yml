@@ -36,7 +36,7 @@ jobs:
       # 외부 Action은 커밋 SHA로 고정한다. 이 job은 contents:write와 actions:write를
       # 들고 있어서, 태그가 옮겨지면 그 권한으로 남의 코드가 돈다.
       # 갱신 방법은 docs/GITHUB_ACTIONS.md 참고.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
