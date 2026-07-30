@@ -91,10 +91,12 @@ jobs:
           # 5시간의 공백을 맞바꿀 수는 없다. 중복 알림 가능성은 README에 적어뒀다.
           for attempt in 1 2; do
             # autostash: uv가 추적 파일(uv.lock)을 다시 썼으면 rebase가 거부된다.
+            # 이 분기는 충돌뿐 아니라 인증·네트워크 실패도 잡는다. 인증이 깨지면
+            # push보다 여기서 먼저 걸리므로, 원인을 충돌로 단정하면 진단이 꼬인다.
             if ! git pull --rebase --autostash origin main; then
               git rebase --abort || true
-              echo "::warning::상태 파일 rebase 충돌 - 푸시하지 않고 종료한다"
-              alert "상태 저장 실패 — rebase 충돌. 다음 실행이 이전 상태로 시작. 중복 알림 가능"
+              echo "::warning::상태 파일 rebase 실패 - 푸시하지 않고 종료한다"
+              alert "상태 저장 실패 — rebase 실패(충돌 또는 인증). 다음 실행이 이전 상태로 시작. 중복 알림 가능"
               exit 0
             fi
             if git push origin HEAD:main; then
