@@ -289,10 +289,11 @@ def test_outage_notification_content() -> None:
 
     assert sent is True
     request = responses.calls[0].request
-    assert decode_title(request.headers["Title"]) == "Naver Booking Slot Watch 감시 중단"
+    assert decode_title(request.headers["Title"]) == "Naver Booking Slot Watch 감시 실패"
     assert request.headers["Priority"] == PRIORITY_AVAILABLE, "감시가 멈춘 상태는 높은 우선순위"
     body = (request.body or b"").decode("utf-8")
-    assert "연속 실패: 5회" in body
+    assert "모든 예약 조회가 5회 연속 실패했습니다." in body
+    assert "요청 Session을 초기화하고 감시를 계속 재시도합니다." in body
     assert "대상 회차: 3개" in body
     assert "최근 정상 조회: 2026-07-28 14:30:12 KST" in body
 
@@ -304,6 +305,22 @@ def test_outage_notification_without_any_prior_success() -> None:
         consecutive_iterations=5, slots=1, last_success_at=None, detected_at=CHECKED_AT
     )
     assert "최근 정상 조회: 없음" in (responses.calls[0].request.body or b"").decode("utf-8")
+
+
+@responses.activate
+def test_recovery_notification_content() -> None:
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+
+    sent = Notifier(CONFIG).notify_recovery(slots=3, recovered_at=CHECKED_AT)
+
+    assert sent is True
+    request = responses.calls[0].request
+    assert decode_title(request.headers["Title"]) == "Naver Booking Slot Watch 감시 복구"
+    body = (request.body or b"").decode("utf-8")
+    assert "예약 조회가 다시 성공했습니다." in body
+    assert "감시는 계속 정상적으로 진행됩니다." in body
+    assert "활성 대상 회차: 3개" in body
+    assert "복구 확인 시각: 2026-07-28 14:30:12 KST" in body
 
 
 @responses.activate

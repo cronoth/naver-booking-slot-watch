@@ -156,7 +156,8 @@ state/availability.json
   },
   "heartbeat": {
     "last_sent_date": "2026-07-28"
-  }
+  },
+  "outage_alert_sent": false
 }
 ```
 
@@ -164,7 +165,9 @@ state/availability.json
 
 `fingerprint`는 `businessTypeId/businessId/bizItemId`다. 상태 키에는 상품 식별자가 없어서, 같은 `monitor.id`로 URL만 다른 상품으로 바꾸면 이전 상품의 알림 기록이 새 상품에 적용된다. 지문이 현재 설정과 다르면 그 회차 상태를 초기화한다. `null`은 지문을 남기기 전의 상태 파일이며 일치로 취급한다(배포 직후 중복 알림 방지).
 
-두 필드 모두 없으면 기본값(`false`, `null`)으로 읽으므로 기존 상태 파일을 그대로 이어받는다.
+`outage_alert_sent`는 전역 `감시 실패` 알림을 성공적으로 보낸 뒤, 복구 알림을 기다리는 표시다. 슬롯별 `error_alert_sent`와 별개라 여러 슬롯이 같은 응답을 공유해도 복구 알림을 하나만 보낼 수 있다.
+
+세 필드 모두 없으면 기본값(`false`, `null`, `false`)으로 읽으므로 기존 상태 파일을 그대로 이어받는다.
 
 ## 6. 상태 값
 
@@ -191,6 +194,12 @@ available
 - `last_error` 갱신
 - 실패 시각은 별도 필드로 두어도 됨
 - 실패 결과를 `sold_out`으로 저장하지 않음
+
+### 전역 감시 실패와 복구
+
+모든 활성 조회가 5회 연속 실패하면 `감시 실패` 알림을 시도한 뒤 현재 Naver 요청 Session을 한 번 교체한다. 루프 deadline·반복 횟수·조회 주기는 바꾸지 않고, 추가 요청 없이 다음 정규 회차부터 새 Session으로 계속 조회한다.
+
+전역 알림 전송이 성공하면 `outage_alert_sent = true`를 즉시 저장한다. 다음 회차에서 하나라도 정상 조회하면 `감시 복구` 알림을 한 번 보낸다. 복구 알림 전송이 성공할 때만 `outage_alert_sent = false`로 되돌리며, 실패하면 다음 성공 회차에서 재시도한다.
 
 ## 7. 알림 판단 함수
 

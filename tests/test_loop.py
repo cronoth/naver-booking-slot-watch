@@ -25,9 +25,15 @@ from booking_slot_watch.monitor import (
     next_interval,
     run_loop,
 )
-from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverApiError, NaverBookingClient
+from booking_slot_watch.naver import (
+    GRAPHQL_URL,
+    KST,
+    NaverApiError,
+    NaverBookingClient,
+    parse_hourly_schedule,
+)
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
-from booking_slot_watch.state import SlotState, State, StateError, load_state
+from booking_slot_watch.state import SlotState, State, StateError, load_state, save_state
 
 TOPIC = "loop-topic"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -48,6 +54,30 @@ class FakeClock:
     def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
         self.current += timedelta(seconds=seconds)
+
+
+class ScriptedClient:
+    """회차별 실패·성공과 Session 초기화 순서를 기록하는 대역."""
+
+    def __init__(self, failures: list[bool]) -> None:
+        self.failures = failures
+        self.calls = 0
+        self.resets = 0
+        self.events: list[str] = []
+
+    def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
+        self.calls += 1
+        self.events.append(f"fetch:{self.calls}")
+        if self.failures.pop(0) if self.failures else False:
+            raise NaverApiError("timed out", kind="timeout")
+        return parse_hourly_schedule(payload(0), target_date)
+
+    def reset_session(self) -> None:
+        self.resets += 1
+        self.events.append("reset")
+
+    def close(self) -> None:
+        pass
 
 
 def payload(remaining: int) -> dict[str, Any]:
@@ -130,7 +160,11 @@ def ntfy_titles() -> list[str]:
 
 
 def outage_alerts() -> list[str]:
-    return [t for t in ntfy_titles() if "감시 중단" in t]
+    return [t for t in ntfy_titles() if "감시 실패" in t]
+
+
+def recovery_alerts() -> list[str]:
+    return [t for t in ntfy_titles() if "감시 복구" in t]
 
 
 def settings(seconds: float, *, interval: float = 70.0, jitter: float = 0.0) -> LoopSettings:
@@ -630,13 +664,215 @@ def test_sustained_total_failure_alerts_once_and_keeps_the_chain(tmp_path: Path)
 
 
 @responses.activate
+def test_outage_resets_session_once_after_alert_and_then_recovers(tmp_path: Path) -> None:
+    client = ScriptedClient([True] * OUTAGE_ALERT_ITERATIONS + [False])
+    clock = FakeClock(START)
+
+    def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
+        title = _title_of(request)
+        if title == "Naver Booking Slot Watch 감시 실패":
+            client.events.append("outage_alert")
+        if title == "Naver Booking Slot Watch 감시 복구":
+            client.events.append("recovery_alert")
+        return 200, {}, "{}"
+
+    responses.add_callback(
+        responses.POST, NTFY_URL, callback=ntfy, content_type="application/json"
+    )
+    state = State()
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        result = run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings(6 * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert result.iterations == 6
+    assert client.resets == 1
+    assert client.events.index("outage_alert") < client.events.index("reset")
+    assert client.events.index("reset") < client.events.index("fetch:6")
+    assert len(outage_alerts()) == 1
+    assert len(recovery_alerts()) == 1
+    assert state.outage_alert_sent is False
+    assert load_state(tmp_path / "state.json").outage_alert_sent is False
+
+
+@responses.activate
+def test_outage_notification_retry_does_not_reset_session_again(tmp_path: Path) -> None:
+    client = ScriptedClient([True] * (OUTAGE_ALERT_ITERATIONS + 1))
+    attempts = 0
+    clock = FakeClock(START)
+
+    def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
+        nonlocal attempts
+        if _title_of(request) == "Naver Booking Slot Watch 감시 실패":
+            attempts += 1
+            return (500 if attempts == 1 else 200), {}, "{}"
+        return 200, {}, "{}"
+
+    responses.add_callback(
+        responses.POST, NTFY_URL, callback=ntfy, content_type="application/json"
+    )
+    state = State()
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings((OUTAGE_ALERT_ITERATIONS + 1) * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert attempts == 2
+    assert client.resets == 1
+    assert state.outage_alert_sent is True
+
+
+@responses.activate
+def test_persisted_outage_alert_sends_one_recovery_after_a_new_run(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    assert save_state(path, State(outage_alert_sent=True), START) is True
+    state = load_state(path)
+    client = ScriptedClient([False])
+    responses.add(responses.POST, NTFY_URL, json={})
+    clock = FakeClock(START)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=path,
+            settings=settings(70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert len(recovery_alerts()) == 1
+    assert state.outage_alert_sent is False
+    assert load_state(path).outage_alert_sent is False
+
+
+@responses.activate
+def test_persisted_outage_does_not_reset_the_fresh_session_again(tmp_path: Path) -> None:
+    client = ScriptedClient([True] * OUTAGE_ALERT_ITERATIONS)
+    responses.add(responses.POST, NTFY_URL, json={})
+    clock = FakeClock(START)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            State(outage_alert_sent=True),
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings(OUTAGE_ALERT_ITERATIONS * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert client.resets == 0
+    assert outage_alerts() == []
+
+
+@responses.activate
+def test_failed_recovery_notification_is_retried_on_the_next_success(tmp_path: Path) -> None:
+    client = ScriptedClient([False, False])
+    attempts = 0
+
+    def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
+        nonlocal attempts
+        if _title_of(request) == "Naver Booking Slot Watch 감시 복구":
+            attempts += 1
+            return (500 if attempts == 1 else 200), {}, "{}"
+        return 200, {}, "{}"
+
+    responses.add_callback(
+        responses.POST, NTFY_URL, callback=ntfy, content_type="application/json"
+    )
+    state = State(outage_alert_sent=True)
+    clock = FakeClock(START)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings(2 * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert attempts == 2
+    assert state.outage_alert_sent is False
+
+
+@responses.activate
+def test_recovery_allows_a_new_outage_to_reset_the_session_again(tmp_path: Path) -> None:
+    client = ScriptedClient(
+        [True] * OUTAGE_ALERT_ITERATIONS + [False] + [True] * OUTAGE_ALERT_ITERATIONS + [False]
+    )
+    responses.add(responses.POST, NTFY_URL, json={})
+    state = State()
+    clock = FakeClock(START)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings(12 * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert client.resets == 2
+    assert len(outage_alerts()) == 2
+    assert len(recovery_alerts()) == 2
+    assert state.outage_alert_sent is False
+
+
+@responses.activate
 def test_outage_alert_is_retried_until_the_send_succeeds(tmp_path: Path) -> None:
     """임계값 회차에만 보내면 그때 ntfy가 실패하면 감시가 멈춘 것을 아무도 모른다."""
     responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
     attempts = {"n": 0}
 
     def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
-        if "감시 중단" not in _title_of(request):
+        if "감시 실패" not in _title_of(request):
             return 200, {}, "{}"
         attempts["n"] += 1
         return (500 if attempts["n"] == 1 else 200), {}, "{}"
@@ -659,6 +895,9 @@ def test_repeated_unexpected_errors_are_reported_as_an_outage(tmp_path: Path) ->
     class ExplodingClient:
         def fetch_hourly_schedule(self, identifiers: Any, target_date: Any) -> Any:
             raise RuntimeError("예상 못한 오류")
+
+        def reset_session(self) -> None:
+            pass
 
         def close(self) -> None:
             pass

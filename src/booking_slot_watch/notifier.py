@@ -196,21 +196,39 @@ class Notifier:
         last_success_at: datetime | None,
         detected_at: datetime,
     ) -> bool:
-        """모든 회차가 연속으로 실패할 때 한 번 보낸다. 감시가 사실상 멈춘 상태다."""
+        """모든 회차가 연속으로 실패하면 Session을 교체한 뒤 계속 감시한다."""
         message = "\n".join(
             (
-                f"연속 실패: {consecutive_iterations}회",
+                f"모든 예약 조회가 {consecutive_iterations}회 연속 실패했습니다.",
+                "요청 Session을 초기화하고 감시를 계속 재시도합니다.",
                 f"대상 회차: {slots}개",
                 f"최근 정상 조회: {_format_time(last_success_at)}",
                 f"확인 시각: {detected_at.strftime(_TIME_FORMAT)}",
-                "점검: Actions 로그의 error= 값",
             )
         )
         return self._publish(
             topic=self.config.topic,
-            title="Naver Booking Slot Watch 감시 중단",
+            title="Naver Booking Slot Watch 감시 실패",
             message=message,
             priority=PRIORITY_AVAILABLE,
+            tags=TAGS_ERROR,
+        )
+
+    def notify_recovery(self, *, slots: int, recovered_at: datetime) -> bool:
+        """전역 감시 실패 알림을 보낸 뒤 조회가 다시 성공했음을 알린다."""
+        message = "\n".join(
+            (
+                "예약 조회가 다시 성공했습니다.",
+                "감시는 계속 정상적으로 진행됩니다.",
+                f"활성 대상 회차: {slots}개",
+                f"복구 확인 시각: {recovered_at.strftime(_TIME_FORMAT)}",
+            )
+        )
+        return self._publish(
+            topic=self.config.topic,
+            title="Naver Booking Slot Watch 감시 복구",
+            message=message,
+            priority=PRIORITY_ERROR,
             tags=TAGS_ERROR,
         )
 

@@ -50,6 +50,7 @@ class CapturingSession:
     def __init__(self, body: dict[str, Any]) -> None:
         self.body = body
         self.calls: list[dict[str, Any]] = []
+        self.closed = False
 
     def post(self, url: str, **kwargs: Any) -> requests.Response:
         self.calls.append({"url": url, **kwargs})
@@ -59,7 +60,7 @@ class CapturingSession:
         return response
 
     def close(self) -> None:
-        pass
+        self.closed = True
 
 
 # --- 응답 파싱 (순수 함수) -------------------------------------------------
@@ -390,6 +391,32 @@ def test_uses_the_injected_session_for_connection_reuse() -> None:
 
     assert client.session is session
     assert len(responses.calls) == 2
+
+
+def test_reset_replaces_the_session_without_changing_rate_limit_state(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first = CapturingSession(payload())
+    second = CapturingSession(payload())
+    client = NaverBookingClient(
+        session=first,
+        session_factory=lambda: second,
+        sleep=SleepRecorder(),
+    )  # type: ignore[arg-type]
+    client._rate_limit_streak = 2
+
+    with caplog.at_level("INFO"):
+        client.reset_session()
+        assert client._rate_limit_streak == 2
+        client.fetch_hourly_schedule(IDENTIFIERS, TARGET_DATE)
+
+    assert first.closed is True
+    assert client.session is second
+    assert first.calls == []
+    assert len(second.calls) == 1
+    assert client._rate_limit_streak == 0, "기존 성공 경로는 rate-limit 스트릭을 초기화한다"
+    assert "Naver requests.Session 초기화" in caplog.text
+    assert "초기화된 Session으로 조회 재개" in caplog.text
 
 
 def test_creates_its_own_session_when_none_is_given() -> None:

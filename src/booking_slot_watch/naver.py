@@ -8,6 +8,7 @@ DuckOnDesk/naver-booking-monitor 의 `check_booking.py`를 근거로 한다.
 실패는 반드시 예외로 나가고, 상태 판단은 호출자가 한다.
 """
 
+import logging
 import time as time_module
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from zoneinfo import ZoneInfo
 import requests
 
 from .models import BookingIdentifiers
+
+logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -176,24 +179,37 @@ class NaverBookingClient:
         self,
         session: requests.Session | None = None,
         *,
+        session_factory: Callable[[], requests.Session] = requests.Session,
         sleep: Callable[[float], None] | None = None,
         timeout: float = REQUEST_TIMEOUT_SEC,
         retry_delays: tuple[float, ...] = RETRY_DELAYS_SEC,
     ) -> None:
-        self.session = session if session is not None else requests.Session()
+        self._session_factory = session_factory
+        self.session = session if session is not None else session_factory()
         self.timeout = timeout
         # 기본값을 정의 시점에 묶지 않는다. 테스트가 time.sleep을 대체할 수 있어야 한다.
         self._sleep = sleep if sleep is not None else time_module.sleep
         self._retry_delays = retry_delays
         #: 403/429가 연속된 조회 횟수. 대기 시간을 늘리는 데 쓴다.
         self._rate_limit_streak = 0
+        self._session_was_reset = False
 
     def close(self) -> None:
         self.session.close()
 
+    def reset_session(self) -> None:
+        """연결 풀만 비우고, 다음 정규 조회부터 새 Session을 쓴다."""
+        self.session.close()
+        self.session = self._session_factory()
+        self._session_was_reset = True
+        logger.info("Naver requests.Session 초기화")
+
     def fetch_hourly_schedule(
         self, identifiers: BookingIdentifiers, target_date: date
     ) -> HourlySchedule:
+        if self._session_was_reset:
+            logger.info("초기화된 Session으로 조회 재개")
+            self._session_was_reset = False
         body = _request_body(identifiers, target_date)
         backoff = min(1 + self._rate_limit_streak, MAX_RATE_LIMIT_BACKOFF)
         last_error: NaverApiError | None = None

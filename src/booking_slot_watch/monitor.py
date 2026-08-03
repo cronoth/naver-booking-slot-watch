@@ -376,7 +376,9 @@ def run_loop(
     iterations = 0
     reason = "deadline"
     all_failed_streak = 0
-    outage_alerted = False
+    # 다음 Actions 실행은 이미 새 Session으로 시작한다. 저장된 장애 알림이 있으면
+    # 같은 장애에서 또 교체하지 않는다.
+    session_reset_for_outage = state.outage_alert_sent
     #: 전면 장애 알림에 넣을 대상 수. 조회에 성공한 마지막 회차의 값이다.
     last_slots_active = 0
 
@@ -396,20 +398,25 @@ def run_loop(
         job은 실패시키지 않는다 — 실패시키면 연결 실행이 끊기고 지연이 큰 cron에
         복구를 맡기게 된다. 대신 알려서 보이게 만든다.
         """
-        nonlocal all_failed_streak, outage_alerted
+        nonlocal all_failed_streak, session_reset_for_outage
         all_failed_streak += 1
-        if all_failed_streak < OUTAGE_ALERT_ITERATIONS or outage_alerted:
+        if all_failed_streak < OUTAGE_ALERT_ITERATIONS:
             return
-        logger.error(
-            "모든 회차가 %d회 연속 실패했다 - 감시가 사실상 멈춘 상태다", all_failed_streak
-        )
-        # 전송이 확인될 때까지 다음 회차에서 다시 시도한다.
-        outage_alerted = notifier.notify_outage(
-            consecutive_iterations=all_failed_streak,
-            slots=last_slots_active,
-            last_success_at=latest_success(state),
-            detected_at=at,
-        )
+        if all_failed_streak == OUTAGE_ALERT_ITERATIONS:
+            logger.error("모든 회차가 %d회 연속 실패했다", all_failed_streak)
+        if not state.outage_alert_sent:
+            logger.info("감시 실패 알림 전송 시도")
+            if notifier.notify_outage(
+                consecutive_iterations=all_failed_streak,
+                slots=last_slots_active,
+                last_success_at=latest_success(state),
+                detected_at=at,
+            ):
+                state.outage_alert_sent = True
+                save_state(state_path, state, at)
+        if not session_reset_for_outage:
+            client.reset_session()
+            session_reset_for_outage = True
 
     while True:
         if should_stop():
@@ -457,8 +464,16 @@ def run_loop(
         if outcome.slots_checked > 0 and outcome.slots_failed == outcome.slots_checked:
             note_blackout(now)
         else:
+            if state.outage_alert_sent and outcome.slots_checked > outcome.slots_failed:
+                logger.info("전면 실패 상태 해소")
+                if notifier.notify_recovery(slots=outcome.slots_active, recovered_at=now):
+                    state.outage_alert_sent = False
+                    save_state(state_path, state, now)
+                    logger.info("감시 복구 알림 전송 성공")
+                else:
+                    logger.warning("감시 복구 알림 전송 실패 - 다음 성공 회차에서 재시도")
             all_failed_streak = 0
-            outage_alerted = False
+            session_reset_for_outage = False
 
         # 회차마다 체크포인트한다. GitHub이 취소할 때 프로세스를 강제 종료하면
         # 루프 종료 저장이 실행되지 않아, 알림을 동반하지 않는 전이가 통째로 사라진다.
