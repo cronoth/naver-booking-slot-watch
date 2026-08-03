@@ -833,6 +833,49 @@ def test_failed_recovery_notification_is_retried_on_the_next_success(tmp_path: P
 
     assert attempts == 2
     assert state.outage_alert_sent is False
+    assert state.recovery_alert_pending is False
+
+
+@responses.activate
+def test_failed_recovery_notification_does_not_block_a_new_outage_alert(tmp_path: Path) -> None:
+    client = ScriptedClient(
+        [True] * OUTAGE_ALERT_ITERATIONS + [False] + [True] * OUTAGE_ALERT_ITERATIONS
+    )
+    recovery_attempts = 0
+
+    def ntfy(request: Any) -> tuple[int, dict[str, str], str]:
+        nonlocal recovery_attempts
+        if _title_of(request) == "Naver Booking Slot Watch 감시 복구":
+            recovery_attempts += 1
+            return 500, {}, "{}"
+        return 200, {}, "{}"
+
+    responses.add_callback(
+        responses.POST, NTFY_URL, callback=ntfy, content_type="application/json"
+    )
+    state = State()
+    clock = FakeClock(START)
+    notifier = Notifier(NtfyConfig(topic=TOPIC))
+    try:
+        run_loop(
+            write_config(tmp_path),
+            state,
+            client=client,  # type: ignore[arg-type]
+            notifier=notifier,
+            state_path=tmp_path / "state.json",
+            settings=settings((2 * OUTAGE_ALERT_ITERATIONS + 1) * 70),
+            clock=clock.now,
+            sleep=clock.sleep,
+            random_fn=lambda: 0.0,
+        )
+    finally:
+        notifier.close()
+
+    assert len(outage_alerts()) == 2
+    assert recovery_attempts == 1
+    assert client.resets == 2
+    assert state.outage_alert_sent is True
+    assert state.recovery_alert_pending is True
 
 
 @responses.activate

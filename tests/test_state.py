@@ -61,6 +61,7 @@ def test_missing_file_starts_from_empty_state(tmp_path: Path) -> None:
     assert state.slots == {}
     assert state.heartbeat_last_sent is None
     assert state.outage_alert_sent is False
+    assert state.recovery_alert_pending is False
 
 
 def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
@@ -88,6 +89,7 @@ def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
         },
         heartbeat_last_sent=date(2026, 7, 28),
         outage_alert_sent=True,
+        recovery_alert_pending=True,
     )
 
     save_state(path, original, T2)
@@ -95,6 +97,7 @@ def test_round_trip_preserves_every_field(tmp_path: Path) -> None:
     assert load_state(path).slots == original.slots
     assert load_state(path).heartbeat_last_sent == date(2026, 7, 28)
     assert load_state(path).outage_alert_sent is True
+    assert load_state(path).recovery_alert_pending is True
 
 
 def test_saved_file_matches_documented_shape(tmp_path: Path) -> None:
@@ -108,6 +111,7 @@ def test_saved_file_matches_documented_shape(tmp_path: Path) -> None:
     assert raw["updated_at"] == T2.isoformat()
     assert raw["heartbeat"] == {"last_sent_date": None}
     assert raw["outage_alert_sent"] is False
+    assert raw["recovery_alert_pending"] is False
     assert set(raw["slots"]["event:2026-08-29:11:00"]) == {
         "status",
         "remaining",
@@ -166,6 +170,7 @@ def test_missing_optional_fields_load_as_none(tmp_path: Path) -> None:
     assert slot.error_alert_sent is False
     assert slot.fingerprint is None
     assert load_state(path).outage_alert_sent is False
+    assert load_state(path).recovery_alert_pending is False
 
 
 def test_non_boolean_error_alert_sent_is_a_fatal_error(tmp_path: Path) -> None:
@@ -185,6 +190,16 @@ def test_non_boolean_outage_alert_sent_is_a_fatal_error(tmp_path: Path) -> None:
     path = state_path(tmp_path)
     path.parent.mkdir(parents=True)
     payload = {"version": STATE_VERSION, "outage_alert_sent": "yes"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(StateError):
+        load_state(path)
+
+
+def test_non_boolean_recovery_alert_pending_is_a_fatal_error(tmp_path: Path) -> None:
+    path = state_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    payload = {"version": STATE_VERSION, "recovery_alert_pending": "yes"}
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(StateError):
@@ -295,9 +310,11 @@ def test_save_writes_when_the_heartbeat_date_changed(tmp_path: Path) -> None:
     assert save_state(path, state, T2) is True
 
 
-def test_save_writes_when_the_outage_alert_state_changed(tmp_path: Path) -> None:
+def test_save_writes_when_a_global_alert_state_changed(tmp_path: Path) -> None:
     path, state, _ = saved_once(tmp_path)
     state.outage_alert_sent = True
+    assert save_state(path, state, T2) is True
+    state.recovery_alert_pending = True
     assert save_state(path, state, T2) is True
 
 

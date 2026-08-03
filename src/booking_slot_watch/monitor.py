@@ -466,8 +466,13 @@ def run_loop(
         else:
             if state.outage_alert_sent and outcome.slots_checked > outcome.slots_failed:
                 logger.info("전면 실패 상태 해소")
+                state.outage_alert_sent = False
+                state.recovery_alert_pending = True
+                save_state(state_path, state, now)
+
+            if state.recovery_alert_pending and outcome.slots_checked > outcome.slots_failed:
                 if notifier.notify_recovery(slots=outcome.slots_active, recovered_at=now):
-                    state.outage_alert_sent = False
+                    state.recovery_alert_pending = False
                     save_state(state_path, state, now)
                     logger.info("감시 복구 알림 전송 성공")
                 else:

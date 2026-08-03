@@ -56,8 +56,10 @@ class State:
 
     slots: dict[str, SlotState] = field(default_factory=dict)
     heartbeat_last_sent: date | None = None
-    #: 전역 감시 실패 알림을 보냈으며, 복구 알림을 기다리는 상태다.
+    #: 현재 전역 감시 실패 알림을 보낸 상태다.
     outage_alert_sent: bool = False
+    #: 정상 조회는 확인됐지만 전역 감시 복구 알림을 아직 보내지 못했다.
+    recovery_alert_pending: bool = False
 
 
 def slot_key(monitor_id: str, target_date: date, target_time: time) -> str:
@@ -225,6 +227,8 @@ def load_state(path: Path) -> State:
         slots={key: _parse_slot_state(key, value) for key, value in slots_raw.items()},
         heartbeat_last_sent=_parse_date(heartbeat.get("last_sent_date")),
         outage_alert_sent=_parse_optional_bool("state", raw, "outage_alert_sent") or False,
+        recovery_alert_pending=_parse_optional_bool("state", raw, "recovery_alert_pending")
+        or False,
     )
 
 
@@ -245,6 +249,7 @@ def save_state(path: Path, state: State, updated_at: datetime) -> bool:
             )
         },
         "outage_alert_sent": state.outage_alert_sent,
+        "recovery_alert_pending": state.recovery_alert_pending,
     }
     if _material(payload) == _material(_read_existing(path)):
         return False
@@ -292,6 +297,7 @@ def _material(payload: Any) -> Any:
         "slots": slots,
         "heartbeat": payload.get("heartbeat"),
         "outage_alert_sent": payload.get("outage_alert_sent"),
+        "recovery_alert_pending": payload.get("recovery_alert_pending"),
     }
 
 
