@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "updated_at": "2026-08-16T02:45:13.765046+09:00",
+  "updated_at": "2026-08-16T07:00:42.054086+09:00",
   "slots": {
     "event-20260829:2026-08-29:10:30": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-08-16T02:45:13.765046+09:00",
+      "last_checked_at": "2026-08-16T07:00:42.054086+09:00",
       "last_changed_at": "2026-07-28T16:59:50.333012+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
@@ -16,7 +16,7 @@
     "event-20260829:2026-08-29:12:30": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-08-16T02:45:13.765046+09:00",
+      "last_checked_at": "2026-08-16T07:00:42.054086+09:00",
       "last_changed_at": "2026-08-12T23:14:46.965854+09:00",
       "last_notified_remaining": 2,
       "consecutive_errors": 0,
@@ -27,7 +27,7 @@
     "event-20260829:2026-08-29:14:30": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-08-16T02:45:13.765046+09:00",
+      "last_checked_at": "2026-08-16T07:00:42.054086+09:00",
       "last_changed_at": "2026-08-16T02:45:13.765046+09:00",
       "last_notified_remaining": 2,
       "consecutive_errors": 0,
@@ -37,7 +37,7 @@
     }
   },
   "heartbeat": {
-    "last_sent_date": "2026-08-15"
+    "last_sent_date": "2026-08-16"
   },
   "outage_alert_sent": false,
   "recovery_alert_pending": false
