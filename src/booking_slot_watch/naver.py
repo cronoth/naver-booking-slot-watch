@@ -6,21 +6,17 @@ DuckOnDesk/naver-booking-monitor 의 `check_booking.py`를 근거로 한다.
 
 조회 실패를 `0석`으로 바꾸지 않는 것이 이 모듈의 핵심 계약이다.
 실패는 반드시 예외로 나가고, 상태 판단은 호출자가 한다.
+재시도·백오프·Session 교체 정책은 `http_client.RetryingClient`가 맡는다.
 """
 
-import logging
-import time as time_module
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import requests
-
+from .http_client import MAX_RATE_LIMIT_BACKOFF as MAX_RATE_LIMIT_BACKOFF
+from .http_client import FetchError, RetryingClient
 from .models import BookingIdentifiers
-
-logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -47,27 +43,11 @@ DEFAULT_HEADERS = {
     "Referer": "https://m.booking.naver.com/",
 }
 
-REQUEST_TIMEOUT_SEC = 15.0
-#: 같은 조회에서 최대 2회 재시도하며 그 사이 대기 시간.
-RETRY_DELAYS_SEC = (2.0, 5.0)
-RATE_LIMITED_STATUSES = frozenset({403, 429})
-#: 403/429가 이어질 때 대기 배수의 상한.
-#:
-#: 이 sleep은 종료 신호로 끊을 수 없다. 상한이 없으면 5시간 30분 job에서 연속
-#: 실패가 쌓여 한 번의 조회가 수십 분 잠들고, 작업이 취소될 때 유예 시간을
-#: 넘겨 종료 직전 상태 저장을 잃는다.
-MAX_RATE_LIMIT_BACKOFF = 6
-
 _START_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
-class NaverApiError(Exception):
-    """조회 실패. `kind`로 실패 종류를 구분해 로그와 백오프에 쓴다."""
-
-    def __init__(self, message: str, *, kind: str, status: int | None = None) -> None:
-        super().__init__(message)
-        self.kind = kind
-        self.status = status
+class NaverApiError(FetchError):
+    """네이버 조회 실패. `kind`로 실패 종류를 구분해 로그와 백오프에 쓴다."""
 
 
 @dataclass(frozen=True)
@@ -172,86 +152,20 @@ def _parse_start_time(value: Any) -> datetime:
         raise _malformed(f"unitStartTime 형식이 다르다: {value!r}") from exc
 
 
-class NaverBookingClient:
-    """`hourlySchedule` 조회 전용 클라이언트. 연결은 하나의 Session으로 재사용한다."""
+class NaverBookingClient(RetryingClient):
+    """`hourlySchedule` 조회 전용 클라이언트."""
 
-    def __init__(
-        self,
-        session: requests.Session | None = None,
-        *,
-        session_factory: Callable[[], requests.Session] = requests.Session,
-        sleep: Callable[[float], None] | None = None,
-        timeout: float = REQUEST_TIMEOUT_SEC,
-        retry_delays: tuple[float, ...] = RETRY_DELAYS_SEC,
-    ) -> None:
-        self._session_factory = session_factory
-        self.session = session if session is not None else session_factory()
-        self.timeout = timeout
-        # 기본값을 정의 시점에 묶지 않는다. 테스트가 time.sleep을 대체할 수 있어야 한다.
-        self._sleep = sleep if sleep is not None else time_module.sleep
-        self._retry_delays = retry_delays
-        #: 403/429가 연속된 조회 횟수. 대기 시간을 늘리는 데 쓴다.
-        self._rate_limit_streak = 0
-        self._session_was_reset = False
-
-    def close(self) -> None:
-        self.session.close()
-
-    def reset_session(self) -> None:
-        """연결 풀만 비우고, 다음 정규 조회부터 새 Session을 쓴다."""
-        self.session.close()
-        self.session = self._session_factory()
-        self._session_was_reset = True
-        logger.info("Naver requests.Session 초기화")
+    error_class = NaverApiError
+    session_label = "Naver"
 
     def fetch_hourly_schedule(
         self, identifiers: BookingIdentifiers, target_date: date
     ) -> HourlySchedule:
-        if self._session_was_reset:
-            logger.info("초기화된 Session으로 조회 재개")
-            self._session_was_reset = False
         body = _request_body(identifiers, target_date)
-        backoff = min(1 + self._rate_limit_streak, MAX_RATE_LIMIT_BACKOFF)
-        last_error: NaverApiError | None = None
-
-        for attempt in range(len(self._retry_delays) + 1):
-            try:
-                schedule = self._attempt(body, target_date)
-            except NaverApiError as error:
-                last_error = error
-                if not _is_retryable(error) or attempt == len(self._retry_delays):
-                    break
-                self._sleep(self._retry_delays[attempt] * backoff)
-            else:
-                self._rate_limit_streak = 0
-                return schedule
-
-        assert last_error is not None
-        if last_error.kind == "rate_limited":
-            self._rate_limit_streak += 1
-        raise last_error
+        return self._run_with_retry(lambda: self._attempt(body, target_date))
 
     def _attempt(self, body: dict[str, Any], target_date: date) -> HourlySchedule:
-        try:
-            response = self.session.post(
-                GRAPHQL_URL, json=body, headers=DEFAULT_HEADERS, timeout=self.timeout
-            )
-        except requests.Timeout as exc:
-            raise NaverApiError(f"요청 시간 초과: {exc}", kind="timeout") from exc
-        except requests.RequestException as exc:
-            raise NaverApiError(f"네트워크 오류: {exc}", kind="network_error") from exc
-
-        if response.status_code in RATE_LIMITED_STATUSES:
-            raise NaverApiError(
-                f"요청이 차단됐다: HTTP {response.status_code}",
-                kind="rate_limited",
-                status=response.status_code,
-            )
-        if response.status_code >= 400:
-            raise NaverApiError(
-                f"HTTP {response.status_code}", kind="http_error", status=response.status_code
-            )
-
+        response = self._send("post", GRAPHQL_URL, json=body, headers=DEFAULT_HEADERS)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -274,9 +188,3 @@ def _request_body(identifiers: BookingIdentifiers, target_date: date) -> dict[st
         },
         "query": HOURLY_SCHEDULE_QUERY,
     }
-
-
-def _is_retryable(error: NaverApiError) -> bool:
-    if error.kind in ("timeout", "network_error", "rate_limited"):
-        return True
-    return error.kind == "http_error" and error.status is not None and error.status >= 500

@@ -18,6 +18,7 @@ from booking_slot_watch.state import (
     record_success,
     save_state,
     slot_key,
+    variant_key,
 )
 
 KST = ZoneInfo("Asia/Seoul")
@@ -36,6 +37,12 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 # --- 상태 키 --------------------------------------------------------------
+
+
+def test_variant_key_cannot_collide_with_a_slot_key() -> None:
+    """야놀자 옵션 키는 날짜 자리가 `variant`라 네이버 회차 키와 겹치지 않는다."""
+    assert variant_key("vivaldi", 15375322) == "vivaldi:variant:15375322"
+    assert variant_key("vivaldi", 15375322) != slot_key("vivaldi", date(2026, 8, 29), time(14, 30))
 
 
 def test_slot_key_matches_documented_format() -> None:

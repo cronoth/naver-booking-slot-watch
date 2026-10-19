@@ -1,9 +1,11 @@
 """단계 7 — check_once 오케스트레이션. 네이버와 ntfy를 모두 responses로 태운다."""
 
 import json
+import re
 from datetime import date as date_type
 from datetime import datetime
 from datetime import time as time_type
+from email.header import decode_header
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +14,11 @@ import requests
 import responses
 
 from booking_slot_watch.config import Config, load_config
-from booking_slot_watch.monitor import check_once, should_send_heartbeat
+from booking_slot_watch.monitor import Clients, check_once, should_send_heartbeat
 from booking_slot_watch.naver import GRAPHQL_URL, KST, NaverBookingClient
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
-from booking_slot_watch.state import SlotState, State, slot_key
+from booking_slot_watch.state import SlotState, State, slot_key, variant_key
+from booking_slot_watch.yanolja import YanoljaClient, product_url
 
 TOPIC = "topic-for-tests"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -26,6 +29,60 @@ HEARTBEAT_NOW = datetime(2026, 7, 28, 14, 30, 12, tzinfo=KST)
 
 URL_A = "https://m.booking.naver.com/booking/12/bizes/472710/items/7804183"
 URL_B = "https://m.booking.naver.com/booking/6/bizes/333/items/444"
+
+YANOLJA_URL = "https://leisure-web.yanolja.com/leisure/10374449"
+PAGE_URL = product_url(10374449)
+PREMIUM_V300 = 15375322
+FIXTURES = Path(__file__).parent / "fixtures"
+_NEXT_DATA = re.compile(
+    r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S
+)
+
+
+def yanolja_page(statuses: dict[int, str] | None = None) -> str:
+    """fixture 페이지에서 지정한 옵션의 `variantStatusCode`만 바꾼 HTML."""
+    html = (FIXTURES / "yanolja_product.html").read_text(encoding="utf-8")
+    if not statuses:
+        return html
+    match = _NEXT_DATA.search(html)
+    assert match is not None
+    data = json.loads(match.group(1))
+    for group in data["props"]["pageProps"]["product"]["productOptionGroups"]:
+        for variant in group["variants"]:
+            if variant["variantId"] in statuses:
+                variant["variantStatusCode"] = statuses[variant["variantId"]]
+    return html.replace(match.group(1), json.dumps(data, ensure_ascii=False))
+
+
+def add_page(html: str, status: int = 200) -> None:
+    responses.add(
+        responses.GET, PAGE_URL, body=html, status=status, content_type="text/html; charset=utf-8"
+    )
+
+
+def yanolja_entry(**overrides: Any) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": "vivaldi",
+        "name": "비발디 프리미엄",
+        "enabled": True,
+        "url": YANOLJA_URL,
+        "variants": [PREMIUM_V300],
+        "expires_at": "2099-01-01T00:00:00+09:00",
+    }
+    entry.update(overrides)
+    return entry
+
+
+def decode_title(raw: str) -> str:
+    text, charset = decode_header(raw)[0]
+    return text.decode(charset) if isinstance(text, bytes) else text
+
+
+def make_clients(naver: Any = None) -> Clients:
+    return Clients(
+        naver=naver if naver is not None else NaverBookingClient(sleep=lambda _: None),
+        yanolja=YanoljaClient(sleep=lambda _: None),
+    )
 
 
 def payload(*, remaining_at_1430: int = 0, sale: bool = True) -> dict[str, Any]:
@@ -78,12 +135,12 @@ def monitor_entry(**overrides: Any) -> dict[str, Any]:
 
 
 def run(config: Config, state: State, now: datetime = NOW) -> Any:
-    client = NaverBookingClient(sleep=lambda _: None)
+    clients = make_clients()
     notifier = Notifier(NtfyConfig(topic=TOPIC))
     try:
-        return check_once(config, state, client=client, notifier=notifier, now=now)
+        return check_once(config, state, clients=clients, notifier=notifier, now=now)
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
 
@@ -451,15 +508,15 @@ def test_stops_starting_new_request_groups_when_told_to(tmp_path: Path) -> None:
         calls["n"] += 1
         return calls["n"] <= 1  # 첫 그룹만 허용
 
-    client = NaverBookingClient(sleep=lambda _: None)
+    clients = make_clients()
     notifier = Notifier(NtfyConfig(topic=TOPIC))
     try:
         outcome = check_once(
-            config, state, client=client, notifier=notifier, now=NOW,
+            config, state, clients=clients, notifier=notifier, now=NOW,
             should_continue=should_continue,
         )
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
     graphql = [c for c in responses.calls if c.request.url == GRAPHQL_URL]
@@ -478,15 +535,15 @@ def test_skipped_slots_are_not_counted_as_failures(tmp_path: Path) -> None:
             {"date": "2026-08-30", "times": ["14:30"]},
         ]
     )
-    client = NaverBookingClient(sleep=lambda _: None)
+    clients = make_clients()
     notifier = Notifier(NtfyConfig(topic=TOPIC))
     try:
         outcome = check_once(
-            write_config(tmp_path, [entry]), State(), client=client, notifier=notifier,
+            write_config(tmp_path, [entry]), State(), clients=clients, notifier=notifier,
             now=NOW, should_continue=lambda: False,
         )
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
     assert (outcome.slots_checked, outcome.slots_failed, outcome.slots_skipped) == (0, 0, 2)
@@ -619,3 +676,113 @@ def test_each_time_gets_an_independent_state_key(tmp_path: Path) -> None:
     available = slot_key("event", date_type(2026, 8, 29), time_type(14, 30))
     assert state.slots[sold_out].status == "sold_out"
     assert state.slots[available].status == "available"
+
+
+# --- 야놀자 옵션 ------------------------------------------------------------
+
+
+@responses.activate
+def test_yanolja_sold_out_variant_is_recorded_without_notification(tmp_path: Path) -> None:
+    add_page(yanolja_page())
+    state = State()
+
+    outcome = run(write_config(tmp_path, [yanolja_entry()]), state)
+
+    slot = state.slots[variant_key("vivaldi", PREMIUM_V300)]
+    assert (slot.status, slot.remaining) == ("sold_out", 0)
+    assert slot.fingerprint == "yanolja/10374449"
+    assert ntfy_calls() == []
+    assert (outcome.slots_checked, outcome.slots_failed, outcome.notifications_sent) == (1, 0, 0)
+
+
+@responses.activate
+def test_yanolja_variant_on_sale_notifies_without_a_quantity_line(tmp_path: Path) -> None:
+    """수량 필드는 재고가 아니므로 알림에 숫자를 적지 않는다. 제목에는 옵션명이 들어간다."""
+    add_page(yanolja_page({PREMIUM_V300: "IN_SALE"}))
+    responses.add(responses.POST, NTFY_URL, json={})
+    state = State()
+
+    outcome = run(write_config(tmp_path, [yanolja_entry()]), state)
+
+    assert outcome.notifications_sent == 1
+    slot = state.slots[variant_key("vivaldi", PREMIUM_V300)]
+    assert (slot.status, slot.remaining, slot.last_notified_remaining) == ("available", 1, 1)
+    (call,) = ntfy_calls()
+    assert "V300락커(1~2인용)+프리미엄혜택" in decode_title(call.request.headers["Title"])
+    assert call.request.headers["Click"] == YANOLJA_URL
+    body = (call.request.body or b"").decode("utf-8")
+    assert "잔여 수량" not in body
+    assert "상태: 판매 중(IN_SALE)" in body
+
+
+@responses.activate
+def test_yanolja_reopen_notifies_once(tmp_path: Path) -> None:
+    config = write_config(tmp_path, [yanolja_entry()])
+    state = State()
+    add_page(yanolja_page())
+    assert run(config, state).notifications_sent == 0
+
+    responses.reset()
+    add_page(yanolja_page({PREMIUM_V300: "IN_SALE"}))
+    responses.add(responses.POST, NTFY_URL, json={})
+    assert run(config, state).notifications_sent == 1
+    assert run(config, state).notifications_sent == 0, "같은 상태가 이어지면 다시 알리지 않는다"
+
+
+@responses.activate
+def test_missing_variant_is_unknown_not_sold_out(tmp_path: Path) -> None:
+    add_page(yanolja_page())
+
+    outcome = run(write_config(tmp_path, [yanolja_entry(variants=[999])]), state := State())
+
+    slot = state.slots[variant_key("vivaldi", 999)]
+    assert slot.status == "unknown"
+    assert slot.last_error == "variant_not_found"
+    assert outcome.slots_failed == 1
+
+
+@responses.activate
+def test_yanolja_fetch_failure_preserves_the_previous_state(tmp_path: Path) -> None:
+    """Cloudflare 챌린지·대기열 페이지는 조회 실패다. 매진으로 덮어쓰면 안 된다."""
+    config = write_config(tmp_path, [yanolja_entry()])
+    state = State()
+    add_page(yanolja_page())
+    run(config, state)
+
+    responses.reset()
+    add_page("<html><body>일시적으로 서비스를 이용하실 수 없습니다.</body></html>")
+    outcome = run(config, state)
+
+    slot = state.slots[variant_key("vivaldi", PREMIUM_V300)]
+    assert (slot.status, slot.remaining) == ("sold_out", 0)
+    assert slot.consecutive_errors == 1
+    assert slot.last_error == "malformed_response"
+    assert (outcome.slots_checked, outcome.slots_failed) == (1, 1)
+
+
+@responses.activate
+def test_one_failing_provider_does_not_stop_the_other(tmp_path: Path) -> None:
+    responses.add(responses.POST, GRAPHQL_URL, json={}, status=500)
+    add_page(yanolja_page({PREMIUM_V300: "IN_SALE"}))
+    responses.add(responses.POST, NTFY_URL, json={})
+
+    outcome = run(write_config(tmp_path, [monitor_entry(), yanolja_entry()]), state := State())
+
+    assert (outcome.slots_checked, outcome.slots_failed, outcome.notifications_sent) == (2, 1, 1)
+    assert state.slots["event:2026-08-29:14:30"].status == "unknown"
+    assert state.slots[variant_key("vivaldi", PREMIUM_V300)].status == "available"
+
+
+@responses.activate
+def test_two_monitors_on_the_same_product_share_one_page_fetch(tmp_path: Path) -> None:
+    add_page(yanolja_page())
+    entries = [
+        yanolja_entry(id="a", variants=[15375322]),
+        yanolja_entry(id="b", variants=[15375323]),
+    ]
+
+    outcome = run(write_config(tmp_path, entries), state := State())
+
+    assert len([c for c in responses.calls if c.request.url == PAGE_URL]) == 1
+    assert outcome.slots_checked == 2
+    assert set(state.slots) == {"a:variant:15375322", "b:variant:15375323"}

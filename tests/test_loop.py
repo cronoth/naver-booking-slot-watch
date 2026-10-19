@@ -20,6 +20,7 @@ from booking_slot_watch.monitor import (
     MIN_LOOP_MINUTES,
     OUTAGE_ALERT_ITERATIONS,
     SLEEP_STEP_SEC,
+    Clients,
     LoopSettings,
     loop_settings_from_env,
     next_interval,
@@ -34,6 +35,7 @@ from booking_slot_watch.naver import (
 )
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL, Notifier, NtfyConfig
 from booking_slot_watch.state import SlotState, State, StateError, load_state, save_state
+from booking_slot_watch.yanolja import YanoljaClient
 
 TOPIC = "loop-topic"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
@@ -78,6 +80,11 @@ class ScriptedClient:
 
     def close(self) -> None:
         pass
+
+
+def make_clients(naver: Any) -> Clients:
+    """네이버 대역을 끼운 클라이언트 묶음. 야놀자 쪽은 요청이 없으므로 실물이어도 된다."""
+    return Clients(naver=naver, yanolja=YanoljaClient(sleep=lambda _: None))
 
 
 def payload(remaining: int) -> dict[str, Any]:
@@ -125,13 +132,13 @@ def run(
     should_stop: Any = None,
     state: State | None = None,
 ) -> Any:
-    client = NaverBookingClient(sleep=lambda _: None)
+    clients = make_clients(NaverBookingClient(sleep=lambda _: None))
     notifier = Notifier(NtfyConfig(topic=TOPIC))
     try:
         return run_loop(
             config,
             state if state is not None else State(),
-            client=client,
+            clients=clients,
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings,
@@ -141,7 +148,7 @@ def run(
             should_stop=should_stop or (lambda: False),
         )
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
 
@@ -567,7 +574,7 @@ def test_loop_stops_a_slow_iteration_from_eating_the_handoff_budget(tmp_path: Pa
         run_loop(
             config,
             State(),
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings(150),  # 150초 예산: 두 번째 조회 후 초과
@@ -600,7 +607,7 @@ def test_unexpected_exception_does_not_kill_the_loop(tmp_path: Path) -> None:
     result = run_loop(
         write_config(tmp_path),
         State(),
-        client=client,  # type: ignore[arg-type]
+        clients=make_clients(client),
         notifier=Notifier(NtfyConfig(topic=TOPIC)),
         state_path=tmp_path / "state.json",
         settings=settings(180),
@@ -633,7 +640,7 @@ def test_state_write_failure_stays_fatal(tmp_path: Path) -> None:
         run_loop(
             write_config(tmp_path),
             State(),
-            client=ExplodingClient(),  # type: ignore[arg-type]
+            clients=make_clients(ExplodingClient()),
             notifier=Notifier(NtfyConfig(topic=TOPIC)),
             state_path=blocker / "state.json",
             settings=settings(180),
@@ -685,7 +692,7 @@ def test_outage_resets_session_once_after_alert_and_then_recovers(tmp_path: Path
         result = run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings(6 * 70),
@@ -728,7 +735,7 @@ def test_outage_notification_retry_does_not_reset_session_again(tmp_path: Path) 
         run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings((OUTAGE_ALERT_ITERATIONS + 1) * 70),
@@ -757,7 +764,7 @@ def test_persisted_outage_alert_sends_one_recovery_after_a_new_run(tmp_path: Pat
         run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=path,
             settings=settings(70),
@@ -783,7 +790,7 @@ def test_persisted_outage_does_not_reset_the_fresh_session_again(tmp_path: Path)
         run_loop(
             write_config(tmp_path),
             State(outage_alert_sent=True),
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings(OUTAGE_ALERT_ITERATIONS * 70),
@@ -820,7 +827,7 @@ def test_failed_recovery_notification_is_retried_on_the_next_success(tmp_path: P
         run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings(2 * 70),
@@ -860,7 +867,7 @@ def test_failed_recovery_notification_does_not_block_a_new_outage_alert(tmp_path
         run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings((2 * OUTAGE_ALERT_ITERATIONS + 1) * 70),
@@ -891,7 +898,7 @@ def test_recovery_allows_a_new_outage_to_reset_the_session_again(tmp_path: Path)
         run_loop(
             write_config(tmp_path),
             state,
-            client=client,  # type: ignore[arg-type]
+            clients=make_clients(client),
             notifier=notifier,
             state_path=tmp_path / "state.json",
             settings=settings(12 * 70),
@@ -949,7 +956,7 @@ def test_repeated_unexpected_errors_are_reported_as_an_outage(tmp_path: Path) ->
     result = run_loop(
         write_config(tmp_path),
         State(),
-        client=ExplodingClient(),  # type: ignore[arg-type]
+        clients=make_clients(ExplodingClient()),
         notifier=Notifier(NtfyConfig(topic=TOPIC)),
         state_path=tmp_path / "state.json",
         settings=settings(6 * 70),

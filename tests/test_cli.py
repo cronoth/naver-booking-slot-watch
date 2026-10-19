@@ -18,10 +18,18 @@ from booking_slot_watch.__main__ import (
 )
 from booking_slot_watch.naver import GRAPHQL_URL
 from booking_slot_watch.notifier import DEFAULT_SERVER_URL
+from booking_slot_watch.yanolja import product_url
 
 TOPIC = "cli-test-topic"
 NTFY_URL = f"{DEFAULT_SERVER_URL}/{TOPIC}"
 URL = "https://m.booking.naver.com/booking/12/bizes/472710/items/7804183"
+YANOLJA_URL = "https://leisure-web.yanolja.com/leisure/10374449"
+PAGE_URL = product_url(10374449)
+FIXTURES = Path(__file__).parent / "fixtures"
+
+#: CLI는 실제 현재 시각으로 활성 대상을 고르므로 회차 날짜는 먼 미래여야 한다.
+TARGET_DATE = "2099-01-01"
+SLOT_KEY = f"event:{TARGET_DATE}:14:30"
 
 
 def write_config(tmp_path: Path, **overrides: Any) -> Path:
@@ -30,7 +38,7 @@ def write_config(tmp_path: Path, **overrides: Any) -> Path:
         "name": "8월 29일 예약",
         "enabled": True,
         "url": URL,
-        "targets": [{"date": "2026-08-29", "times": ["14:30"]}],
+        "targets": [{"date": TARGET_DATE, "times": ["14:30"]}],
         "expires_at": "2099-01-01T17:00:00+09:00",
     }
     monitor.update(overrides)
@@ -41,6 +49,33 @@ def write_config(tmp_path: Path, **overrides: Any) -> Path:
     return path
 
 
+def write_yanolja_config(tmp_path: Path, **overrides: Any) -> Path:
+    monitor: dict[str, Any] = {
+        "id": "vivaldi",
+        "name": "비발디 프리미엄",
+        "enabled": True,
+        "url": YANOLJA_URL,
+        "variants": [15375322, 15375323],
+        "expires_at": "2099-01-01T00:00:00+09:00",
+    }
+    monitor.update(overrides)
+    path = tmp_path / "monitors.json"
+    path.write_text(
+        json.dumps({"version": 1, "monitors": [monitor]}, ensure_ascii=False), encoding="utf-8"
+    )
+    return path
+
+
+def yanolja_page() -> str:
+    return (FIXTURES / "yanolja_product.html").read_text(encoding="utf-8")
+
+
+def add_page(html: str, status: int = 200) -> None:
+    responses.add(
+        responses.GET, PAGE_URL, body=html, status=status, content_type="text/html; charset=utf-8"
+    )
+
+
 def payload(remaining: int) -> dict[str, Any]:
     return {
         "data": {
@@ -48,7 +83,7 @@ def payload(remaining: int) -> dict[str, Any]:
                 "bizItemSchedule": {
                     "hourly": [
                         {
-                            "unitStartTime": "2026-08-29 14:30:00",
+                            "unitStartTime": f"{TARGET_DATE} 14:30:00",
                             "unitBookingCount": 16 - remaining,
                             "unitStock": 16,
                             "isUnitSaleDay": True,
@@ -149,6 +184,77 @@ def test_has_active_targets_reports_config_errors_separately(tmp_path: Path) -> 
     assert cli(tmp_path, "has-active-targets", bad) == EXIT_CONFIG_ERROR
 
 
+# --- 야놀자 모니터 ----------------------------------------------------------
+
+
+def test_validate_config_accepts_a_yanolja_monitor(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        assert cli(tmp_path, "validate-config", write_yanolja_config(tmp_path)) == EXIT_OK
+    assert "slots=2" in caplog.text, "옵션 수가 대상 수로 집계돼야 한다"
+
+
+def test_has_active_targets_counts_variants(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        assert cli(tmp_path, "has-active-targets", write_yanolja_config(tmp_path)) == EXIT_OK
+    assert "slots=2" in caplog.text
+
+
+@responses.activate
+def test_check_once_handles_a_yanolja_monitor(tmp_path: Path) -> None:
+    add_page(yanolja_page())
+    responses.add(responses.POST, NTFY_URL, json={})
+
+    assert cli(tmp_path, "check-once", write_yanolja_config(tmp_path)) == EXIT_OK
+
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["slots"]["vivaldi:variant:15375322"]["status"] == "sold_out"
+    assert saved["slots"]["vivaldi:variant:15375323"]["status"] == "sold_out"
+
+
+# --- list-variants -----------------------------------------------------------
+
+
+@responses.activate
+def test_list_variants_prints_every_option(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)  # ntfy 없이도 동작해야 한다
+    add_page(yanolja_page())
+
+    assert main(["list-variants", "--url", YANOLJA_URL]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "15375318" in out and "IN_SALE" in out
+    assert "15375322" in out and "SOLD_OUT" in out
+    assert "프리미엄" in out
+    assert "V300락커(1~2인용)+프리미엄혜택" in out
+
+
+def test_list_variants_rejects_a_naver_url() -> None:
+    assert main(["list-variants", "--url", URL]) == EXIT_CONFIG_ERROR
+
+
+@responses.activate
+def test_list_variants_reports_fetch_failure() -> None:
+    add_page("", status=500)
+    assert main(["list-variants", "--url", YANOLJA_URL]) == EXIT_RUNTIME_ERROR
+
+
+def test_list_variants_requires_a_url() -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["list-variants"])
+    assert exc.value.code == 2
+
+
+def test_url_option_is_only_on_list_variants() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["check-once", "--url", YANOLJA_URL])
+
+
 # --- check-once -----------------------------------------------------------
 
 
@@ -160,7 +266,7 @@ def test_check_once_succeeds_and_writes_state(tmp_path: Path) -> None:
     assert cli(tmp_path, "check-once", write_config(tmp_path)) == EXIT_OK
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert saved["slots"]["event:2026-08-29:14:30"]["status"] == "sold_out"
+    assert saved["slots"][SLOT_KEY]["status"] == "sold_out"
 
 
 @responses.activate
@@ -179,7 +285,7 @@ def test_check_once_still_saves_state_when_checks_fail(tmp_path: Path) -> None:
     cli(tmp_path, "check-once", write_config(tmp_path))
 
     saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert saved["slots"]["event:2026-08-29:14:30"]["consecutive_errors"] == 1
+    assert saved["slots"][SLOT_KEY]["consecutive_errors"] == 1
 
 
 def test_check_once_signals_no_active_targets(tmp_path: Path) -> None:

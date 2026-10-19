@@ -67,6 +67,11 @@ def slot_key(monitor_id: str, target_date: date, target_time: time) -> str:
     return f"{monitor_id}:{target_date.isoformat()}:{target_time.strftime('%H:%M')}"
 
 
+def variant_key(monitor_id: str, variant_id: int) -> str:
+    """`{monitor_id}:variant:{variantId}` 형식의 야놀자 옵션 상태 키. 날짜 키와 겹치지 않는다."""
+    return f"{monitor_id}:variant:{variant_id}"
+
+
 def record_success(
     previous: SlotState | None, *, remaining: int, threshold: int, checked_at: datetime
 ) -> SlotState:

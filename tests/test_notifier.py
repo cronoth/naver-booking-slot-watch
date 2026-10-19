@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, time
+from datetime import datetime
 from email.header import decode_header
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,8 +37,7 @@ def notify_available(notifier: Notifier, **overrides: Any) -> bool:
     kwargs: dict[str, Any] = {
         "monitor_name": "8월 29일 예약",
         "url": BOOKING_URL,
-        "target_date": date(2026, 8, 29),
-        "target_time": time(14, 30),
+        "target": "2026-08-29 14:30",
         "remaining": 1,
         "previous_status": "sold_out",
         "checked_at": CHECKED_AT,
@@ -164,6 +163,28 @@ def test_available_notification_body() -> None:
 
 
 @responses.activate
+def test_available_notification_without_a_quantity_shows_details_instead() -> None:
+    """야놀자는 판매 상태만 보므로 수량 줄을 넣지 않는다. 옵션명이 제목에 들어간다."""
+    responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
+    notify_available(
+        Notifier(CONFIG),
+        target="리프트 시즌패스(1인) + V300락커(1~2인용)+프리미엄혜택",
+        remaining=None,
+        details=("상태: 판매 중(IN_SALE)",),
+    )
+
+    request = responses.calls[0].request
+    assert decode_title(request.headers["Title"]) == (
+        "[8월 29일 예약] 예약 가능 — 리프트 시즌패스(1인) + V300락커(1~2인용)+프리미엄혜택"
+    )
+    assert (request.body or b"").decode("utf-8").splitlines() == [
+        "상태: 판매 중(IN_SALE)",
+        "이전 상태: 매진",
+        "확인 시각: 2026-07-28 14:30:12 KST",
+    ]
+
+
+@responses.activate
 @pytest.mark.parametrize(
     ("previous_status", "label"),
     [(None, "첫 확인"), ("unknown", "확인 불가"), ("sold_out", "매진"), ("available", "예약 가능")],
@@ -201,8 +222,7 @@ def test_error_notification_content() -> None:
     responses.add(responses.POST, f"{DEFAULT_SERVER_URL}/{TOPIC}", body="{}")
     sent = Notifier(CONFIG).notify_error(
         monitor_name="8월 29일 예약",
-        target_date=date(2026, 8, 29),
-        target_time=time(14, 30),
+        target="2026-08-29 14:30",
         error="rate_limited",
         consecutive_errors=3,
         failed_at=CHECKED_AT,

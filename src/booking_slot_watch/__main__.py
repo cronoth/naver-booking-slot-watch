@@ -14,12 +14,14 @@ from pathlib import Path
 from types import FrameType
 from zoneinfo import ZoneInfo
 
-from .config import ConfigError, active_monitors, load_config
-from .models import Config
-from .monitor import check_once, loop_settings_from_env, run_loop
+from .config import ConfigError, active_monitors, load_config, parse_monitor_url, target_count
+from .http_client import FetchError
+from .models import Config, YanoljaProduct
+from .monitor import Clients, check_once, loop_settings_from_env, run_loop
 from .naver import NaverBookingClient
 from .notifier import Notifier, NotifierConfigError, ntfy_config_from_env
 from .state import StateError, load_state, save_state
+from .yanolja import YanoljaClient
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -39,6 +41,7 @@ COMMANDS: dict[str, str] = {
     "has-active-targets": "활성 대상 존재 여부를 exit code로 반환",
     "send-test-notification": "ntfy 테스트 알림 전송",
     "send-ops-alert": "운영 경고를 ntfy로 전송 (워크플로 셸에서 사용)",
+    "list-variants": "야놀자 레저 상품 URL의 옵션 ID·상태·이름 출력 (variants 설정용)",
 }
 
 logger = logging.getLogger("booking_slot_watch")
@@ -47,7 +50,7 @@ logger = logging.getLogger("booking_slot_watch")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="booking-slot-watch",
-        description="네이버 예약 회차 잔여석 감시 및 ntfy 알림",
+        description="네이버 예약 회차 잔여석·야놀자 레저 옵션 판매 상태 감시 및 ntfy 알림",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     created: dict[str, argparse.ArgumentParser] = {}
@@ -57,6 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH, help="상태 파일 경로")
         created[name] = sub
     created["send-ops-alert"].add_argument("--message", required=True, help="보낼 경고 문구")
+    created["list-variants"].add_argument("--url", required=True, help="야놀자 레저 상품 URL")
     return parser
 
 
@@ -89,6 +93,8 @@ def _dispatch(args: argparse.Namespace, env: Mapping[str, str]) -> int:
         return _check_once(args.config, args.state, env)
     if args.command == "monitor":
         return _monitor(args.config, args.state, env)
+    if args.command == "list-variants":
+        return _list_variants(args.url)
     logger.error("%s: 아직 구현되지 않았습니다", args.command)
     return EXIT_RUNTIME_ERROR
 
@@ -108,7 +114,7 @@ def _validate_config(config_path: Path) -> int:
 def _has_active_targets(config_path: Path) -> int:
     config = load_config(config_path)
     active = active_monitors(config, _now())
-    slots = sum(len(target.times) for monitor in active for target in monitor.targets)
+    slots = sum(target_count(monitor) for monitor in active)
     if not slots:
         logger.info("활성 대상 없음")
         return EXIT_NO_ACTIVE_TARGETS
@@ -150,11 +156,11 @@ def _check_once(config_path: Path, state_path: Path, env: Mapping[str, str]) -> 
     state = load_state(state_path)
     now = _now()
 
-    client = NaverBookingClient()
+    clients = _clients()
     try:
-        outcome = check_once(config, state, client=client, notifier=notifier, now=now)
+        outcome = check_once(config, state, clients=clients, notifier=notifier, now=now)
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
     save_state(state_path, state, now)
@@ -181,24 +187,51 @@ def _monitor(config_path: Path, state_path: Path, env: Mapping[str, str]) -> int
     state = load_state(state_path)
     should_stop = _install_stop_handlers()
 
-    client = NaverBookingClient()
+    clients = _clients()
     try:
         result = run_loop(
             config,
             state,
-            client=client,
+            clients=clients,
             notifier=notifier,
             state_path=state_path,
             settings=settings,
             should_stop=should_stop,
         )
     finally:
-        client.close()
+        clients.close()
         notifier.close()
 
     if result.stopped_reason == "no_active_targets":
         return EXIT_NO_ACTIVE_TARGETS
     return EXIT_OK
+
+
+def _list_variants(url: str) -> int:
+    """야놀자 상품의 옵션 목록을 출력한다. `variants`에 넣을 variantId를 찾는 용도다."""
+    identifiers = parse_monitor_url(url)
+    if not isinstance(identifiers, YanoljaProduct):
+        raise ConfigError(f"야놀자 레저 상품 URL이 아니다: {url!r}")
+
+    client = YanoljaClient()
+    try:
+        product = client.fetch_product(identifiers.product_id)
+    except FetchError as exc:
+        logger.error("옵션 조회 실패: %s (%s)", exc.kind, exc)
+        return EXIT_RUNTIME_ERROR
+    finally:
+        client.close()
+
+    print(f"product={product.product_id} status={product.status_code}")
+    print("variantId\tstatus\tgroup / name")
+    for variant_id in sorted(product.variants):
+        variant = product.variants[variant_id]
+        print(f"{variant_id}\t{variant.status_code}\t{variant.group_name} / {variant.name}")
+    return EXIT_OK
+
+
+def _clients() -> Clients:
+    return Clients(naver=NaverBookingClient(), yanolja=YanoljaClient())
 
 
 def _install_stop_handlers() -> Callable[[], bool]:
@@ -216,7 +249,7 @@ def _install_stop_handlers() -> Callable[[], bool]:
 
 
 def _count_slots(config: Config) -> int:
-    return sum(len(target.times) for monitor in config.monitors for target in monitor.targets)
+    return sum(target_count(monitor) for monitor in config.monitors)
 
 
 def _now() -> datetime:
