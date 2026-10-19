@@ -46,10 +46,20 @@
         }
       ],
       "expires_at": "2026-09-06T18:00:00+09:00"
+    },
+    {
+      "id": "vivaldi-premium-2627",
+      "name": "비발디 26/27 프리미엄 시즌패스",
+      "enabled": true,
+      "url": "https://leisure-web.yanolja.com/leisure/10374449",
+      "variants": [15375322, 15375323],
+      "expires_at": "2026-11-08T23:59:00+09:00"
     }
   ]
 }
 ```
+
+제공자는 `url`의 호스트로 구분한다. `booking.naver.com`이면 네이버 예약(`targets`), `yanolja.com`이면 야놀자 레저(`variants`)다. 별도 `provider` 필드는 없다.
 
 ## 2. 필드 정의
 
@@ -68,10 +78,11 @@
 | `id` | 예 | 상태 키에 사용하는 고유 ID |
 | `name` | 예 | 로그·알림 표시명 |
 | `enabled` | 예 | 활성화 여부 |
-| `url` | 예 | 네이버 예약 URL |
-| `targets` | 예 | 날짜와 시간 목록 |
-| `expires_at` | 권장 | ISO 8601 KST 만료 시각 |
-| `notify_when_remaining_at_least` | 아니오 | 알림 최소 잔여 수량 |
+| `url` | 예 | 네이버 예약 URL(`/booking/{type}/bizes/{biz}/items/{item}`) 또는 야놀자 레저 상품 URL(`/leisure/{productId}`) |
+| `targets` | 네이버만 | 날짜와 시간 목록. 야놀자 모니터에는 쓸 수 없다 |
+| `variants` | 야놀자만 | 감시할 옵션 variantId(양의 정수) 배열. 네이버 모니터에는 쓸 수 없다. `list-variants` 명령으로 찾는다 |
+| `expires_at` | 네이버 권장, 야놀자 필수 | ISO 8601 KST 만료 시각. 야놀자는 회차 시각이 없어 이것 외에 자동 종료 조건이 없으므로 활성 모니터에 반드시 넣는다 |
+| `notify_when_remaining_at_least` | 아니오 | 알림 최소 잔여 수량. 야놀자 모니터는 `1`만 허용 |
 | `notify_on_initial_available` | 아니오 | 첫 조회부터 가능할 때 알림 |
 | `notify_on_increase` | 아니오 | 잔여 수량 증가 시 재알림 |
 
@@ -88,13 +99,16 @@
 
 - `version == 1`
 - `id`는 비어 있지 않고 전체에서 중복되지 않음
-- URL이 네이버 예약 경로 형식과 일치
+- URL이 네이버 예약 경로 형식 또는 야놀자 레저 상품 경로 형식과 일치
+- 네이버 모니터: `targets` 필수, `variants` 금지
+- 야놀자 모니터: `variants` 필수(활성일 때 비어 있지 않음), `targets` 금지, `notify_when_remaining_at_least == 1`, 활성이면 `expires_at` 필수
 - `target.date`는 ISO 날짜
 - `target.times`는 `HH:MM`
+- `variants` 항목은 양의 정수이며 중복 없음
 - 같은 모니터 안에서 날짜·시간 중복 제거 또는 오류
 - `notify_when_remaining_at_least >= 1`
 - `expires_at`에 timezone offset 존재
-- 활성 모니터에는 최소 하나의 대상 회차 존재
+- 활성 모니터에는 최소 하나의 대상 회차(네이버) 또는 옵션(야놀자) 존재
 
 설정 오류가 하나라도 있으면 장시간 루프를 시작하지 말고 비정상 종료한다.
 
@@ -105,6 +119,7 @@
 - 지난 날짜의 `target`은 제외
 - 오늘 날짜에서 이미 시작된 `time`은 제외 (`시작 시각 <= now` → 제외, 유예 시간 없음)
 - 남은 회차가 없는 모니터는 비활성
+- 야놀자 모니터는 회차 시각이 없으므로 `enabled`와 `expires_at`만 본다. 판매 종료는 `expires_at`으로 끊는다
 
 이미 시작된 회차는 예약할 수 없다. 계속 조회하면 참여할 수 없는 회차에 예약 가능 알림이 나가고 API 호출만 쌓인다. 오늘 대상이 전부 지나면 `has-active-targets`가 exit 3을 내고 연결 실행이 멈춘다.
 
@@ -164,7 +179,9 @@ state/availability.json
 
 `error_alert_sent`는 조회 실패 알림을 실제로 보냈는지다. 임계값에 도달한 순간에만 보내면 그때 ntfy가 실패하면 다음 조회는 이미 임계값을 넘어서서 다시 보내지 않는다. 그래서 `연속 오류 >= 임계값 && !error_alert_sent`이면 계속 시도하고, 전송에 성공한 뒤에만 표시를 남긴다. 정상 조회가 한 번이라도 있으면 `consecutive_errors`와 함께 풀린다.
 
-`fingerprint`는 `businessTypeId/businessId/bizItemId`다. 상태 키에는 상품 식별자가 없어서, 같은 `monitor.id`로 URL만 다른 상품으로 바꾸면 이전 상품의 알림 기록이 새 상품에 적용된다. 지문이 현재 설정과 다르면 그 회차 상태를 초기화한다. `null`은 지문을 남기기 전의 상태 파일이며 일치로 취급한다(배포 직후 중복 알림 방지).
+`fingerprint`는 네이버가 `businessTypeId/businessId/bizItemId`, 야놀자가 `yanolja/{productId}`다. 상태 키에는 상품 식별자가 없어서, 같은 `monitor.id`로 URL만 다른 상품으로 바꾸면 이전 상품의 알림 기록이 새 상품에 적용된다. 지문이 현재 설정과 다르면 그 회차 상태를 초기화한다. `null`은 지문을 남기기 전의 상태 파일이며 일치로 취급한다(배포 직후 중복 알림 방지).
+
+야놀자 옵션의 상태 키는 `{monitor_id}:variant:{variantId}`다(예: `vivaldi-premium-2627:variant:15375322`). 날짜 자리가 `variant`라 네이버 회차 키와 겹치지 않는다. `remaining`은 판매 상태를 숫자로 옮긴 값이라 `1`(`IN_SALE`) 또는 `0`(그 외)만 나온다. 페이지의 수량 필드는 구매 수량 상한이지 재고가 아니므로 저장하지 않는다.
 
 `outage_alert_sent`는 현재 전역 `감시 실패` 알림을 성공적으로 보냈는지 표시한다. `recovery_alert_pending`은 정상 조회는 확인됐지만 전역 `감시 복구` 알림이 아직 성공하지 않았다는 표시다. 슬롯별 `error_alert_sent`와 별개라 여러 슬롯이 같은 응답을 공유해도 복구 알림을 하나만 보낼 수 있다.
 

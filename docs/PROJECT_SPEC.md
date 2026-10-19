@@ -4,7 +4,7 @@
 
 - 저장소: `cronoth/naver-booking-slot-watch`
 - 패키지명: `booking_slot_watch`
-- 목적: 네이버 예약의 특정 날짜·시간 회차 잔여석을 감시하고 `ntfy` 알림 전송
+- 목적: 네이버 예약의 특정 날짜·시간 회차 잔여석과 야놀자 레저 상품의 옵션별 판매 상태를 감시하고 `ntfy` 알림 전송
 
 ## 2. 해결하려는 문제
 
@@ -43,6 +43,7 @@ bizItemId      = 7804183
 - URL별 다중 날짜
 - 날짜별 다중 시간 회차
 - 회차별 잔여 수량 확인
+- 야놀자 레저 상품의 옵션(variant)별 판매 상태 확인(`variantStatusCode == IN_SALE`만 예약 가능으로 본다. 페이지의 수량 필드는 구매 상한이지 재고가 아니므로 쓰지 않는다)
 - 매진에서 예약 가능으로 바뀔 때 알림
 - 잔여 수량 증가 시 선택적 재알림
 - 중복 알림 방지
@@ -311,10 +312,14 @@ LOOP_MINUTES=330
 ## 13. 로깅
 
 ```text
-2026-07-28 14:00:00 INFO monitor=concert-a date=2026-08-29 time=11:00 status=sold_out remaining=0
-2026-07-28 14:00:01 INFO monitor=concert-a date=2026-08-29 time=14:00 status=available remaining=1 notified=true
-2026-07-28 14:00:02 ERROR monitor=restaurant-b error=http_429 previous_state_preserved=true
+2026-07-28 14:00:00 INFO monitor=concert-a target=2026-08-29 11:00 status=sold_out remaining=0 notified=false
+2026-07-28 14:00:01 INFO monitor=concert-a target=2026-08-29 14:00 status=available remaining=1 notified=true
+2026-07-28 14:00:02 ERROR monitor=restaurant-b request=2026-08-29 error=rate_limited previous_state_preserved=true
+2026-07-28 14:00:03 INFO monitor=vivaldi-premium-2627 target=variant:15375322 status=sold_out remaining=0 notified=false
+2026-07-28 14:00:04 ERROR monitor=vivaldi-premium-2627 request=product:10374449 error=malformed_response previous_state_preserved=true
 ```
+
+`target=`은 네이버가 `날짜 시각`, 야놀자가 `variant:{variantId}`다. 조회 실패 로그의 `request=`는 네이버가 조회 날짜, 야놀자가 `product:{productId}`다.
 
 로그에 포함하면 안 되는 값:
 

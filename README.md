@@ -1,6 +1,6 @@
 # naver-booking-slot-watch
 
-네이버 예약 상품의 **특정 날짜·특정 시간 회차** 잔여석을 감시하고, 매진이 풀리면 [`ntfy`](https://ntfy.sh)로 폰에 알림을 보낸다.
+네이버 예약 상품의 **특정 날짜·특정 시간 회차** 잔여석을 감시하고, 매진이 풀리면 [`ntfy`](https://ntfy.sh)로 폰에 알림을 보낸다. 야놀자 레저 상품은 **옵션(variant)별 판매 상태**(품절 → 판매 중)를 같은 방식으로 감시한다.
 
 ```
 [8월 29일 예약] 예약 가능 — 2026-08-29 14:30
@@ -13,6 +13,7 @@
 
 - 여러 예약 URL, URL마다 여러 날짜, 날짜마다 여러 시간 회차
 - 회차별 잔여 수량 확인과 회차별 독립 상태 관리
+- 야놀자 레저 상품의 옵션별 판매 상태(`SOLD_OUT` → `IN_SALE`) 감시. 수량은 보지 않는다
 - `매진 → 예약 가능` 전환 알림
 - 예약 가능 상태에서 잔여 수량이 늘 때 재알림(선택)
 - 중복 알림 방지
@@ -24,19 +25,24 @@
 
 - **자동 예약을 하지 않는다.** 알림만 보낸다.
 - 네이버 로그인·쿠키·CAPTCHA를 다루지 않는다.
-- Playwright로 페이지를 렌더링하지 않는다. GraphQL API를 직접 호출한다.
+- Playwright로 페이지를 렌더링하지 않는다. 네이버는 GraphQL API를 직접 호출하고, 야놀자는 상품 페이지 HTML에 들어 있는 `__NEXT_DATA__` JSON을 읽는다.
 
 ## 동작 방식
 
 ```
-monitors.json ─┬─ 상품+날짜로 묶어 GraphQL hourlySchedule 1회 호출
-               └─ 응답에서 회차별 unitStock - unitBookingCount 계산
+monitors.json ─┬─ 네이버: 상품+날짜로 묶어 GraphQL hourlySchedule 1회 호출
+               │     └─ 응답에서 회차별 unitStock - unitBookingCount 계산
+               ├─ 야놀자: 상품으로 묶어 상품 페이지 HTML 1회 조회
+               │     └─ __NEXT_DATA__의 variantStatusCode가 IN_SALE이면 1, 아니면 0
+               └─ 대상마다
                      ├─ 잔여 >= 기준 → available → 이전 상태와 비교해 알림 판단
                      ├─ 잔여 <  기준 → sold_out
-                     └─ 오류·응답 구조 변경·회차 없음 → unknown (이전 상태 보존)
+                     └─ 오류·응답 구조 변경·대상 없음 → unknown (이전 상태 보존)
                           ↓
-                  state/availability.json (회차별 키, 원자적 저장)
+                  state/availability.json (대상별 키, 원자적 저장)
 ```
+
+야놀자 페이지의 `quantityPerPerson` 같은 숫자는 구매 수량 선택 상한이지 재고가 아니다(품절 옵션에도 숫자가 남아 있다). 그래서 상태 코드만 본다.
 
 **조회 실패를 매진으로 취급하지 않는다.** API 오류와 `0석`은 다른 사건이므로 `unknown`으로 두고 직전 정상 상태를 유지한다. 이게 이 도구의 핵심 계약이다.
 
@@ -79,13 +85,28 @@ uv run booking-slot-watch --help
 }
 ```
 
+야놀자 레저 상품은 `targets` 대신 `variants`(옵션 variantId 배열)를 쓴다. 제공자는 URL 호스트로 구분하므로 별도 필드가 없다.
+
+```json
+{
+  "id": "vivaldi-premium-2627",
+  "name": "비발디 26/27 프리미엄 시즌패스",
+  "enabled": true,
+  "url": "https://leisure-web.yanolja.com/leisure/10374449",
+  "variants": [15375322, 15375323],
+  "expires_at": "2026-11-08T23:59:00+09:00"
+}
+```
+
 지켜야 할 것:
 
-- `id`는 저장소 전체에서 유일해야 한다. 상태 키가 `{id}:{date}:{time}`이다.
+- `id`는 저장소 전체에서 유일해야 한다. 상태 키가 네이버는 `{id}:{date}:{time}`, 야놀자는 `{id}:variant:{variantId}`다.
 - `expires_at`에는 timezone offset을 반드시 넣는다(`+09:00`). 없으면 설정 오류다.
 - `times`는 `HH:MM` 형식이다. `9:00`이나 `09:00:00`은 거부된다.
+- 야놀자 모니터에는 `targets`를, 네이버 모니터에는 `variants`를 쓸 수 없다. 야놀자 모니터의 `notify_when_remaining_at_least`는 `1`만 허용한다(판매 상태만 보므로 잔여는 0 또는 1이다).
+- 활성 야놀자 모니터에는 `expires_at`이 필수다. 회차 시각이 없어 지난 회차 걷어내기가 적용되지 않으므로, 만료가 없으면 감시가 영원히 이어진다. 판매 종료일을 넣는다.
 - 중단은 `"enabled": false` 또는 `expires_at`을 과거로 두면 된다.
-- 같은 URL·같은 날짜의 여러 시간은 GraphQL 호출 한 번으로 묶인다.
+- 같은 URL·같은 날짜의 여러 시간은 GraphQL 호출 한 번으로, 같은 야놀자 상품의 여러 옵션은 페이지 조회 한 번으로 묶인다.
 
 형식 예시는 [`monitors.example.json`](monitors.example.json), 전체 필드 정의는 [`docs/CONFIG_AND_STATE.md`](docs/CONFIG_AND_STATE.md)에 있다.
 
@@ -98,6 +119,21 @@ uv run booking-slot-watch --help
 ```powershell
 $env:NTFY_TOPIC = "본인-토픽"
 uv run booking-slot-watch check-once
+```
+
+### 야놀자 variantId 알아내기
+
+옵션 ID는 화면에 보이지 않는다. 상품 URL을 주면 옵션 ID·상태·이름을 출력한다. ntfy 설정은 필요 없다.
+
+```powershell
+uv run booking-slot-watch list-variants --url https://leisure-web.yanolja.com/leisure/10374449
+```
+
+```text
+product=10374449 status=IN_SALE
+variantId	status	group / name
+15375318	IN_SALE	스마트 / 리프트 시즌패스(1인) + V300락커(1~2인용)+스마트혜택
+15375322	SOLD_OUT	프리미엄 / 리프트 시즌패스(1인) + V300락커(1~2인용)+프리미엄혜택
 ```
 
 ## ntfy 앱 설정
@@ -124,6 +160,7 @@ uv run booking-slot-watch send-test-notification
 | `monitor` | 장시간 반복 감시 루프 | O |
 | `send-test-notification` | ntfy 테스트 알림 전송 | O |
 | `send-ops-alert` | 운영 경고를 ntfy로 전송(`--message`). 워크플로 셸이 사용 | O |
+| `list-variants` | 야놀자 상품 URL(`--url`)의 옵션 ID·상태·이름 출력 | |
 
 공통 옵션: `--config`(기본 `monitors.json`), `--state`(기본 `state/availability.json`)
 
@@ -221,8 +258,10 @@ gh workflow disable monitor.yml
 src/booking_slot_watch/
   __main__.py            CLI 진입점과 exit code
   models.py              설정 자료형 (frozen dataclass)
-  config.py              monitors.json 로딩·검증, URL 파싱, 요청 그룹화
+  config.py              monitors.json 로딩·검증, URL 파싱(제공자 구분), 요청 그룹화
+  http_client.py         재시도·백오프·Session 교체 공통 베이스와 FetchError
   naver.py               hourlySchedule 클라이언트와 응답 파싱 순수 함수
+  yanolja.py             상품 페이지 HTML 클라이언트와 __NEXT_DATA__ 파싱 순수 함수
   state.py               상태 파일 입출력, 상태 전이, 알림 판단 순수 함수
   notifier.py            ntfy 전송
   monitor.py             1회 조회 오케스트레이션과 반복 루프
@@ -241,7 +280,8 @@ state/availability.json  회차별 상태 (Actions가 커밋한다)
 로그의 `error=` 값을 본다.
 - `slot_not_found` — 그 날짜에 다른 회차는 있는데 **지정한 시간이 없다.** `monitors.json`의 `times`가 실제 회차와 다르다. 이게 가장 흔한 원인이다.
 - `empty_schedule` — 그 날짜에 회차가 아예 없다. 판매일이 아니다.
-- `malformed_response` — 네이버가 응답 구조를 바꿨다. 파서를 고쳐야 한다.
+- `variant_not_found` — 야놀자 상품 페이지에 **지정한 variantId가 없다.** `list-variants`로 ID를 다시 확인한다.
+- `malformed_response` — 네이버가 응답 구조를 바꿨거나, 야놀자가 상품 페이지 대신 Cloudflare 챌린지·대기열 페이지를 돌려줬다. 계속되면 파서나 요청 헤더를 손봐야 한다.
 - `rate_limited` — 403/429다. 자동으로 백오프하지만 계속되면 `CHECK_INTERVAL_SEC`를 올린다.
 
 **매진인데 알림이 왔다 / 잔여가 있는데 안 온다**
@@ -279,6 +319,7 @@ Actions 로그의 `error=` 값을 본다. `error=` 값이 있으면 `malformed_r
 
 - **공개 저장소다.** `monitors.json`의 예약 URL·모니터 이름·날짜·시간, 상태 파일에 기록된 잔여 수량, Actions 로그가 모두 공개된다. `NTFY_TOPIC`과 `NTFY_TOKEN`은 Secret에만 저장한다.
 - **네이버 GraphQL은 공식 공개 API가 아니다.** 웹 프런트엔드가 쓰는 내부 인터페이스에 의존하므로 네이버가 응답 구조를 바꾸면 동작이 깨진다. 실제로 참고했던 저장소가 쓰던 `saleStartDate` 필드는 이미 스키마에서 사라졌다.
+- **야놀자 상품 페이지의 `__NEXT_DATA__`도 공개 API가 아니다.** 페이지에 Cloudflare 봇 관리가 걸려 있어 GitHub Actions IP에서 챌린지 페이지를 받을 수 있다. 그러면 `malformed_response`나 `rate_limited`가 이어지고 `감시 실패` 알림이 온다.
 - Actions를 무기한 상시 서버로 쓰는 것은 보장된 운영 모델이 아니다. 감시가 끝나면 자동으로 멈추도록 `expires_at`을 넣는다.
 - 이 도구는 알림만 보낸다. 예약은 사람이 한다.
 
