@@ -19,6 +19,14 @@
         }
       ],
       "expires_at": "2026-08-29T17:00:00+09:00"
+    },
+    {
+      "id": "vivaldi-premium-2627",
+      "name": "비발디 26/27 프리미엄 시즌패스",
+      "enabled": true,
+      "url": "https://leisure-web.yanolja.com/leisure/10374449",
+      "variants": [15375322, 15375323, 15375324, 15375325],
+      "expires_at": "2026-11-08T23:59:00+09:00"
     }
   ]
 }
