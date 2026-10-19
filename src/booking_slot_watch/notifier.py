@@ -10,7 +10,7 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import datetime
 from email.header import Header
 
 import requests
@@ -102,24 +102,26 @@ class Notifier:
         *,
         monitor_name: str,
         url: str,
-        target_date: date,
-        target_time: time,
-        remaining: int,
+        target: str,
+        remaining: int | None,
         previous_status: SlotStatus | None,
         checked_at: datetime,
+        details: tuple[str, ...] = (),
     ) -> bool:
-        slot = f"{target_date.isoformat()} {target_time.strftime('%H:%M')}"
-        message = "\n".join(
-            (
-                f"잔여 수량: {remaining}",
-                f"이전 상태: {_status_label(previous_status)}",
-                f"확인 시각: {checked_at.strftime(_TIME_FORMAT)}",
-            )
-        )
+        """`target`은 회차(`2026-08-29 14:30`)나 옵션명이다.
+
+        `remaining`이 None이면 수량 줄을 넣지 않는다. 야놀자는 판매 상태만 보므로
+        숫자를 적으면 거짓 정보가 된다. 대신 `details` 줄이 앞에 들어간다.
+        """
+        lines = list(details)
+        if remaining is not None:
+            lines.append(f"잔여 수량: {remaining}")
+        lines.append(f"이전 상태: {_status_label(previous_status)}")
+        lines.append(f"확인 시각: {checked_at.strftime(_TIME_FORMAT)}")
         return self._publish(
             topic=self.config.topic,
-            title=f"[{monitor_name}] 예약 가능 — {slot}",
-            message=message,
+            title=f"[{monitor_name}] 예약 가능 — {target}",
+            message="\n".join(lines),
             priority=PRIORITY_AVAILABLE,
             tags=TAGS_AVAILABLE,
             click=url,
@@ -129,16 +131,14 @@ class Notifier:
         self,
         *,
         monitor_name: str,
-        target_date: date,
-        target_time: time,
+        target: str,
         error: str,
         consecutive_errors: int,
         failed_at: datetime,
     ) -> bool:
-        slot = f"{target_date.isoformat()} {target_time.strftime('%H:%M')}"
         message = "\n".join(
             (
-                f"대상: {slot}",
+                f"대상: {target}",
                 f"오류: {error}",
                 f"확인 시각: {failed_at.strftime(_TIME_FORMAT)}",
                 "이전 상태: 유지",

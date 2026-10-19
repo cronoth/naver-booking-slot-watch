@@ -9,11 +9,19 @@ import pytest
 from booking_slot_watch.config import (
     ConfigError,
     active_monitors,
-    group_schedule_requests,
+    group_requests,
     load_config,
     parse_booking_url,
+    parse_monitor_url,
+    target_count,
 )
-from booking_slot_watch.models import SlotTarget
+from booking_slot_watch.models import (
+    BookingIdentifiers,
+    ScheduleRequest,
+    SlotTarget,
+    VariantRequest,
+    YanoljaProduct,
+)
 
 KST = ZoneInfo("Asia/Seoul")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +30,20 @@ VALID_URL = (
     "https://m.booking.naver.com/booking/12/bizes/472710/items/7804183"
     "?area=ple&lang=ko&startDateTime=2026-08-29T00%3A00%3A00%2B09%3A00&tab=book&theme=place"
 )
+YANOLJA_URL = "https://leisure-web.yanolja.com/leisure/10374449"
+
+
+def yanolja_dict(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "id": "vivaldi-premium",
+        "name": "비발디 프리미엄",
+        "enabled": True,
+        "url": YANOLJA_URL,
+        "variants": [15375322, 15375323],
+        "expires_at": "2026-11-08T23:59:00+09:00",
+    }
+    base.update(overrides)
+    return base
 
 
 def monitor_dict(**overrides: Any) -> dict[str, Any]:
@@ -75,6 +97,138 @@ def test_parses_booking_url_without_query_string() -> None:
 def test_rejects_url_that_is_not_a_naver_booking_item(url: str) -> None:
     with pytest.raises(ConfigError):
         parse_booking_url(url)
+
+
+def test_naver_url_parses_to_booking_identifiers() -> None:
+    assert isinstance(parse_monitor_url(VALID_URL), BookingIdentifiers)
+
+
+def test_parses_product_id_from_yanolja_url() -> None:
+    assert parse_monitor_url(YANOLJA_URL) == YanoljaProduct(product_id=10374449)
+
+
+def test_parses_yanolja_url_with_query_string() -> None:
+    assert parse_monitor_url(f"{YANOLJA_URL}?utm_source=share") == YanoljaProduct(
+        product_id=10374449
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://leisure-web.yanolja.com/leisure/abc",
+        "https://leisure-web.yanolja.com/leisure/",
+        "https://leisure-web.yanolja.com/stay/10374449",
+        "https://example.com/leisure/10374449",
+        "not-a-url",
+    ],
+)
+def test_rejects_url_that_is_neither_naver_nor_yanolja_product(url: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_monitor_url(url)
+
+
+# --- 야놀자 모니터 설정 ------------------------------------------------------
+
+
+def test_loads_yanolja_monitor_with_variants(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, monitors=[yanolja_dict()]))
+    (monitor,) = config.monitors
+    assert monitor.provider == "yanolja"
+    assert monitor.identifiers == YanoljaProduct(product_id=10374449)
+    assert monitor.variants == (15375322, 15375323)
+    assert monitor.targets == ()
+
+
+def test_naver_monitor_has_no_variants(tmp_path: Path) -> None:
+    (monitor,) = load_config(write_config(tmp_path)).monitors
+    assert monitor.provider == "naver"
+    assert monitor.variants == ()
+
+
+def test_rejects_yanolja_monitor_with_targets(tmp_path: Path) -> None:
+    entry = yanolja_dict(targets=[{"date": "2026-11-01", "times": ["10:00"]}])
+    with pytest.raises(ConfigError, match="targets"):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_rejects_naver_monitor_with_variants(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="variants"):
+        load_config(write_config(tmp_path, monitors=[monitor_dict(variants=[15375322])]))
+
+
+def test_rejects_enabled_yanolja_monitor_without_variants(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[yanolja_dict(variants=[])]))
+    entry = yanolja_dict()
+    del entry["variants"]
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_allows_disabled_yanolja_monitor_without_variants(tmp_path: Path) -> None:
+    entry = yanolja_dict(enabled=False)
+    del entry["variants"]
+    (monitor,) = load_config(write_config(tmp_path, monitors=[entry])).monitors
+    assert monitor.variants == ()
+
+
+@pytest.mark.parametrize("bad", ["15375322", 0, -1, 1.5, True, None])
+def test_rejects_variant_ids_that_are_not_positive_integers(tmp_path: Path, bad: Any) -> None:
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[yanolja_dict(variants=[bad])]))
+
+
+def test_rejects_variants_that_are_not_a_list(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[yanolja_dict(variants=15375322)]))
+
+
+def test_rejects_duplicate_variant_ids(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, monitors=[yanolja_dict(variants=[1, 2, 1])]))
+
+
+def test_rejects_enabled_yanolja_monitor_without_expires_at(tmp_path: Path) -> None:
+    """회차 시각이 없어 자연 종료 조건이 없다. 만료가 없으면 Actions 연결 실행이 영원히 이어진다."""
+    entry = yanolja_dict()
+    del entry["expires_at"]
+    with pytest.raises(ConfigError, match="expires_at"):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_allows_disabled_yanolja_monitor_without_expires_at(tmp_path: Path) -> None:
+    entry = yanolja_dict(enabled=False)
+    del entry["expires_at"]
+    (monitor,) = load_config(write_config(tmp_path, monitors=[entry])).monitors
+    assert monitor.expires_at is None
+
+
+def test_rejects_yanolja_threshold_other_than_one(tmp_path: Path) -> None:
+    """판매 상태만 감시하므로 remaining은 0 또는 1이다. 2 이상이면 알림이 영원히 안 간다."""
+    entry = yanolja_dict(notify_when_remaining_at_least=2)
+    with pytest.raises(ConfigError, match="notify_when_remaining_at_least"):
+        load_config(write_config(tmp_path, monitors=[entry]))
+
+
+def test_root_default_threshold_above_one_is_rejected_for_yanolja(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path, defaults={"notify_when_remaining_at_least": 2}, monitors=[yanolja_dict()]
+    )
+    with pytest.raises(ConfigError, match="notify_when_remaining_at_least"):
+        load_config(path)
+
+
+def test_naver_threshold_above_one_is_still_allowed(tmp_path: Path) -> None:
+    path = write_config(tmp_path, monitors=[monitor_dict(notify_when_remaining_at_least=2)])
+    assert load_config(path).monitors[0].threshold == 2
+
+
+def test_target_count_sums_times_and_variants(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, monitors=[monitor_dict(), yanolja_dict()]))
+    naver, yanolja = config.monitors
+    assert target_count(naver) == 2
+    assert target_count(yanolja) == 2
 
 
 # --- 설정 로딩과 기본값 병합 ----------------------------------------------
@@ -455,12 +609,76 @@ def test_past_date_filtering_uses_korean_time(tmp_path: Path) -> None:
     assert len(active_monitors(config, utc_now)) == 1
 
 
+# --- 활성 대상: 야놀자 ------------------------------------------------------
+
+
+def test_yanolja_monitor_is_active_regardless_of_time_of_day(tmp_path: Path) -> None:
+    """회차 시각이 없으므로 지난 회차 걷어내기가 적용되지 않는다."""
+    config = load_config(write_config(tmp_path, monitors=[yanolja_dict()]))
+    now = datetime(2026, 11, 8, 23, 0, tzinfo=KST)
+    (monitor,) = active_monitors(config, now)
+    assert monitor.variants == (15375322, 15375323)
+
+
+def test_expired_yanolja_monitor_is_inactive(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, monitors=[yanolja_dict()]))
+    assert active_monitors(config, datetime(2026, 11, 9, 0, 0, tzinfo=KST)) == ()
+
+
+def test_disabled_yanolja_monitor_is_inactive(tmp_path: Path) -> None:
+    config = load_config(write_config(tmp_path, monitors=[yanolja_dict(enabled=False)]))
+    assert active_monitors(config, datetime(2026, 10, 19, 0, 0, tzinfo=KST)) == ()
+
+
 # --- 요청 그룹화 ----------------------------------------------------------
+
+
+def test_groups_variants_of_the_same_product_across_monitors(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        monitors=[
+            yanolja_dict(id="a", variants=[15375322]),
+            yanolja_dict(id="b", variants=[15375323, 15375324]),
+        ],
+    )
+    (request,) = group_requests(load_config(path).monitors)
+    assert isinstance(request, VariantRequest)
+    assert request.product == YanoljaProduct(product_id=10374449)
+    assert [(m.id, v) for m, v in request.slots] == [
+        ("a", 15375322),
+        ("b", 15375323),
+        ("b", 15375324),
+    ]
+
+
+def test_different_yanolja_products_are_not_grouped(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        monitors=[
+            yanolja_dict(id="a"),
+            yanolja_dict(id="b", url="https://leisure-web.yanolja.com/leisure/1"),
+        ],
+    )
+    assert len(group_requests(load_config(path).monitors)) == 2
+
+
+def test_mixed_providers_produce_one_request_per_product(tmp_path: Path) -> None:
+    path = write_config(tmp_path, monitors=[monitor_dict(), yanolja_dict()])
+    requests = group_requests(load_config(path).monitors)
+    assert [type(r) for r in requests] == [ScheduleRequest, VariantRequest]
+    assert [len(r.slots) for r in requests] == [2, 2]
+
+
+def test_grouping_ignores_disabled_yanolja_monitor_without_variants(tmp_path: Path) -> None:
+    entry = yanolja_dict(enabled=False)
+    del entry["variants"]
+    assert group_requests(load_config(write_config(tmp_path, monitors=[entry])).monitors) == ()
 
 
 def test_groups_same_product_and_date_into_one_request(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path))
-    (request,) = group_schedule_requests(config.monitors)
+    (request,) = group_requests(config.monitors)
+    assert isinstance(request, ScheduleRequest)
     assert request.identifiers.biz_item_id == "7804183"
     assert request.date == date(2026, 8, 29)
     assert [t for _, t in request.slots] == [time(11, 0), time(14, 0)]
@@ -478,8 +696,8 @@ def test_groups_one_request_per_date(tmp_path: Path) -> None:
             )
         ],
     )
-    requests = group_schedule_requests(load_config(path).monitors)
-    assert [(r.date, len(r.slots)) for r in requests] == [
+    requests = group_requests(load_config(path).monitors)
+    assert [(r.date, len(r.slots)) for r in requests if isinstance(r, ScheduleRequest)] == [
         (date(2026, 8, 29), 1),
         (date(2026, 8, 30), 2),
     ]
@@ -493,7 +711,8 @@ def test_groups_across_monitors_sharing_product_and_date(tmp_path: Path) -> None
             monitor_dict(id="b", targets=[{"date": "2026-08-29", "times": ["14:00"]}]),
         ],
     )
-    (request,) = group_schedule_requests(load_config(path).monitors)
+    (request,) = group_requests(load_config(path).monitors)
+    assert isinstance(request, ScheduleRequest)
     assert [(m.id, t) for m, t in request.slots] == [("a", time(11, 0)), ("b", time(14, 0))]
 
 
@@ -509,13 +728,13 @@ def test_different_products_are_not_grouped(tmp_path: Path) -> None:
             ),
         ],
     )
-    requests = group_schedule_requests(load_config(path).monitors)
+    requests = group_requests(load_config(path).monitors)
     assert len(requests) == 2
 
 
 def test_grouping_ignores_monitors_without_targets(tmp_path: Path) -> None:
     path = write_config(tmp_path, monitors=[monitor_dict(enabled=False, targets=[])])
-    assert group_schedule_requests(load_config(path).monitors) == ()
+    assert group_requests(load_config(path).monitors) == ()
 
 
 # --- 저장소에 커밋된 설정 파일 --------------------------------------------

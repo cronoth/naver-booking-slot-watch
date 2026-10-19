@@ -6,15 +6,24 @@
 import logging
 import random
 import time as time_module
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import ConfigError, active_monitors, group_schedule_requests
-from .models import BookingIdentifiers, Config, MonitorConfig, SlotRequest
-from .naver import HourlySchedule, NaverApiError, NaverBookingClient
+from .config import ConfigError, active_monitors, group_requests
+from .http_client import FetchError
+from .models import (
+    BookingIdentifiers,
+    Config,
+    FetchRequest,
+    MonitorConfig,
+    ScheduleRequest,
+    VariantRequest,
+    YanoljaProduct,
+)
+from .naver import HourlySchedule, NaverBookingClient
 from .notifier import Notifier
 from .state import (
     SlotState,
@@ -27,7 +36,9 @@ from .state import (
     mark_send_failed,
     save_state,
     slot_key,
+    variant_key,
 )
+from .yanolja import YanoljaClient
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +66,22 @@ SLEEP_STEP_SEC = 1.0
 OUTAGE_ALERT_ITERATIONS = 5
 
 
+@dataclass
+class Clients:
+    """제공자별 조회 클라이언트 묶음. 장애 시 Session 교체와 종료를 한 번에 한다."""
+
+    naver: NaverBookingClient
+    yanolja: YanoljaClient
+
+    def reset_session(self) -> None:
+        self.naver.reset_session()
+        self.yanolja.reset_session()
+
+    def close(self) -> None:
+        self.naver.close()
+        self.yanolja.close()
+
+
 @dataclass(frozen=True)
 class CheckOutcome:
     monitors_active: int
@@ -64,6 +91,27 @@ class CheckOutcome:
     notifications_sent: int
     #: 종료 시각이 임박해 시작하지 않은 회차. 조회 실패가 아니다.
     slots_skipped: int = 0
+
+
+@dataclass(frozen=True)
+class Observation:
+    """한 대상(회차 또는 옵션)의 1회 조회 결과.
+
+    `remaining`이 None이면 조회 실패이고 `failure`가 그 이유다. 성공이면 `failure`는 None.
+    """
+
+    monitor: MonitorConfig
+    #: 상태 파일 키. `slot_key` 또는 `variant_key`.
+    key: str
+    #: 로그용 라벨. `2026-08-29 14:30` 또는 `variant:15375322`.
+    log_label: str
+    #: 알림 제목·`대상:` 줄용 라벨. 네이버는 로그 라벨과 같고, 야놀자는 옵션명이다.
+    notify_label: str
+    remaining: int | None
+    failure: str | None
+    #: 알림 본문에 수량 줄을 넣을지. 야놀자는 판매 상태만 보므로 넣지 않는다.
+    show_remaining: bool
+    details: tuple[str, ...] = ()
 
 
 def should_send_heartbeat(last_sent: date | None, now: datetime) -> bool:
@@ -83,7 +131,7 @@ def check_once(
     config: Config,
     state: State,
     *,
-    client: NaverBookingClient,
+    clients: Clients,
     notifier: Notifier,
     now: datetime,
     should_continue: Callable[[], bool] | None = None,
@@ -98,26 +146,21 @@ def check_once(
     때까지 미루면, 뒤 그룹 조회가 길어지는 동안 작업이 취소돼 기록이 사라진다.
     """
     monitors = active_monitors(config, now)
-    schedule_requests = group_schedule_requests(monitors)
-    slots_active = sum(len(request.slots) for request in schedule_requests)
+    requests = group_requests(monitors)
+    slots_active = sum(len(request.slots) for request in requests)
 
     checked = failed = notified = skipped = 0
 
-    for index, request in enumerate(schedule_requests):
+    for index, request in enumerate(requests):
         if should_continue is not None and not should_continue():
-            skipped = sum(len(r.slots) for r in schedule_requests[index:])
+            skipped = sum(len(r.slots) for r in requests[index:])
             logger.error("종료 시각이 임박해 남은 회차 %d건을 시작하지 않는다", skipped)
             break
-        schedule, error = _fetch(client, request.identifiers, request.date, request.slots)
-        for monitor, target_time in request.slots:
+        for observation in _observe(clients, request):
             checked += 1
-            slot_failed, sent = _apply_slot(
+            slot_failed, sent = _apply_target(
                 state,
-                monitor,
-                target_date=request.date,
-                target_time=target_time,
-                schedule=schedule,
-                fetch_error=error,
+                observation,
                 config=config,
                 notifier=notifier,
                 now=now,
@@ -144,63 +187,133 @@ def check_once(
     )
 
 
-def _fetch(
-    client: NaverBookingClient,
-    identifiers: BookingIdentifiers,
-    target_date: date,
-    slots: tuple[SlotRequest, ...],
-) -> tuple[HourlySchedule | None, str | None]:
+def _observe(clients: Clients, request: FetchRequest) -> list[Observation]:
+    if isinstance(request, ScheduleRequest):
+        return _observe_schedule(clients.naver, request)
+    return _observe_product(clients.yanolja, request)
+
+
+def _observe_schedule(client: NaverBookingClient, request: ScheduleRequest) -> list[Observation]:
+    schedule, error = _fetch(
+        lambda: client.fetch_hourly_schedule(request.identifiers, request.date),
+        slots=request.slots,
+        request_label=request.date.isoformat(),
+    )
+    observations: list[Observation] = []
+    for monitor, target_time in request.slots:
+        label = f"{request.date.isoformat()} {target_time.strftime('%H:%M')}"
+        slot = schedule.find(target_time) if schedule is not None else None
+        if slot is None:
+            remaining, failure = None, error or _missing_reason(schedule)
+        else:
+            # 판매하지 않는 회차는 재고가 남아 있어도 예약할 수 없다.
+            remaining, failure = (slot.remaining if slot.sale_enabled else 0), None
+        observations.append(
+            Observation(
+                monitor=monitor,
+                key=slot_key(monitor.id, request.date, target_time),
+                log_label=label,
+                notify_label=label,
+                remaining=remaining,
+                failure=failure,
+                show_remaining=True,
+            )
+        )
+    return observations
+
+
+def _observe_product(client: YanoljaClient, request: VariantRequest) -> list[Observation]:
+    product, error = _fetch(
+        lambda: client.fetch_product(request.product.product_id),
+        slots=request.slots,
+        request_label=f"product:{request.product.product_id}",
+    )
+    observations: list[Observation] = []
+    for monitor, variant_id in request.slots:
+        log_label = f"variant:{variant_id}"
+        variant = product.variants.get(variant_id) if product is not None else None
+        if variant is None:
+            observations.append(
+                Observation(
+                    monitor=monitor,
+                    key=variant_key(monitor.id, variant_id),
+                    log_label=log_label,
+                    notify_label=log_label,
+                    remaining=None,
+                    failure=error or "variant_not_found",
+                    show_remaining=False,
+                )
+            )
+            continue
+        # 수량 필드는 재고가 아니다. 판매 중이면 1, 아니면 0으로만 판정한다.
+        observations.append(
+            Observation(
+                monitor=monitor,
+                key=variant_key(monitor.id, variant_id),
+                log_label=log_label,
+                notify_label=variant.name,
+                remaining=1 if variant.on_sale else 0,
+                failure=None,
+                show_remaining=False,
+                details=(f"상태: 판매 중({variant.status_code})",) if variant.on_sale else (),
+            )
+        )
+    return observations
+
+
+def _fetch[T](
+    call: Callable[[], T],
+    *,
+    slots: Iterable[tuple[MonitorConfig, object]],
+    request_label: str,
+) -> tuple[T | None, str | None]:
     try:
-        return client.fetch_hourly_schedule(identifiers, target_date), None
-    except NaverApiError as exc:
+        return call(), None
+    except FetchError as exc:
         logger.error(
-            "monitor=%s date=%s error=%s previous_state_preserved=true",
+            "monitor=%s request=%s error=%s previous_state_preserved=true",
             ",".join(sorted({monitor.id for monitor, _ in slots})),
-            target_date.isoformat(),
+            request_label,
             exc.kind,
         )
         return None, exc.kind
 
 
-def _apply_slot(
+def _apply_target(
     state: State,
-    monitor: MonitorConfig,
+    observation: Observation,
     *,
-    target_date: date,
-    target_time: time,
-    schedule: HourlySchedule | None,
-    fetch_error: str | None,
     config: Config,
     notifier: Notifier,
     now: datetime,
     on_notified: Callable[[], None] | None = None,
 ) -> tuple[bool, bool]:
-    """한 회차를 판정하고 필요하면 알린다. `(조회 실패 여부, 전송 성공 여부)`."""
-    key = slot_key(monitor.id, target_date, target_time)
+    """한 대상을 판정하고 필요하면 알린다. `(조회 실패 여부, 전송 성공 여부)`."""
+    monitor = observation.monitor
+    key = observation.key
     fingerprint = _fingerprint(monitor.identifiers)
     previous = state.slots.get(key)
     if previous is not None and previous.fingerprint not in (None, fingerprint):
         # 같은 id로 URL만 바꾼 경우다. 이전 상품의 알림 기록을 새 상품에 쓰면
         # 새 상품이 처음부터 예약 가능해도 알림이 누락된다.
-        logger.warning("monitor=%s 상품이 바뀌었다 - 회차 상태를 초기화한다", monitor.id)
+        logger.warning("monitor=%s 상품이 바뀌었다 - 대상 상태를 초기화한다", monitor.id)
         previous = None
 
     def store(slot: SlotState) -> None:
         state.slots[key] = replace(slot, fingerprint=fingerprint)
 
-    availability = schedule.find(target_time) if schedule is not None else None
-
-    if availability is None:
-        failure = fetch_error or _missing_reason(schedule)
+    if observation.remaining is None:
+        failure = observation.failure
+        if failure is None:
+            raise ValueError(f"{key}: 조회 실패인데 사유가 없다")
         result = evaluate_error(
             previous, failure, error_alert_threshold=config.error_alert_threshold, failed_at=now
         )
         store(result.state)
         logger.info(
-            "monitor=%s date=%s time=%s status=%s error=%s consecutive_errors=%d",
+            "monitor=%s target=%s status=%s error=%s consecutive_errors=%d",
             monitor.id,
-            target_date.isoformat(),
-            target_time.strftime("%H:%M"),
+            observation.log_label,
             result.state.status,
             failure,
             result.state.consecutive_errors,
@@ -209,8 +322,7 @@ def _apply_slot(
             return True, False
         sent = notifier.notify_error(
             monitor_name=monitor.name,
-            target_date=target_date,
-            target_time=target_time,
+            target=observation.notify_label,
             error=failure,
             consecutive_errors=result.state.consecutive_errors,
             failed_at=now,
@@ -222,8 +334,7 @@ def _apply_slot(
                 on_notified()
         return True, sent
 
-    # 판매하지 않는 회차는 재고가 남아 있어도 예약할 수 없다.
-    remaining = availability.remaining if availability.sale_enabled else 0
+    remaining = observation.remaining
     result = evaluate_slot(
         previous,
         remaining=remaining,
@@ -238,11 +349,11 @@ def _apply_slot(
         sent = notifier.notify_available(
             monitor_name=monitor.name,
             url=monitor.url,
-            target_date=target_date,
-            target_time=target_time,
-            remaining=remaining,
+            target=observation.notify_label,
+            remaining=remaining if observation.show_remaining else None,
             previous_status=previous.status if previous is not None else None,
             checked_at=now,
+            details=observation.details,
         )
     # 전송이 확인되지 않으면 알린 것으로 기록하지 않는다. 다음 루프에서 다시 시도한다.
     if sent:
@@ -259,10 +370,9 @@ def _apply_slot(
         store(result.state)
 
     logger.info(
-        "monitor=%s date=%s time=%s status=%s remaining=%d notified=%s",
+        "monitor=%s target=%s status=%s remaining=%d notified=%s",
         monitor.id,
-        target_date.isoformat(),
-        target_time.strftime("%H:%M"),
+        observation.log_label,
         result.state.status,
         remaining,
         "true" if sent else "false",
@@ -270,8 +380,10 @@ def _apply_slot(
     return False, sent
 
 
-def _fingerprint(identifiers: BookingIdentifiers) -> str:
+def _fingerprint(identifiers: BookingIdentifiers | YanoljaProduct) -> str:
     """상태가 어느 상품에서 나왔는지 알아보는 지문."""
+    if isinstance(identifiers, YanoljaProduct):
+        return f"yanolja/{identifiers.product_id}"
     return (
         f"{identifiers.business_type_id}/{identifiers.business_id}/{identifiers.biz_item_id}"
     )
@@ -351,7 +463,7 @@ def run_loop(
     config: Config,
     state: State,
     *,
-    client: NaverBookingClient,
+    clients: Clients,
     notifier: Notifier,
     state_path: Path,
     settings: LoopSettings,
@@ -415,7 +527,7 @@ def run_loop(
                 state.outage_alert_sent = True
                 save_state(state_path, state, at)
         if not session_reset_for_outage:
-            client.reset_session()
+            clients.reset_session()
             session_reset_for_outage = True
 
     while True:
@@ -432,7 +544,7 @@ def run_loop(
             outcome = check_once(
                 config,
                 state,
-                client=client,
+                clients=clients,
                 notifier=notifier,
                 now=now,
                 should_continue=lambda: now_fn() < deadline,
