@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-23T16:57:41.937580+09:00",
+  "updated_at": "2026-10-23T20:18:17.249286+09:00",
   "slots": {
     "event-20260829:2026-08-29:10:30": {
       "status": "sold_out",
@@ -38,7 +38,7 @@
     "vivaldi-premium-2627:variant:15375322": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-10-23T16:57:41.937580+09:00",
+      "last_checked_at": "2026-10-23T20:18:17.249286+09:00",
       "last_changed_at": "2026-10-23T16:57:41.937580+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
@@ -47,10 +47,10 @@
       "fingerprint": "yanolja/10374449"
     },
     "vivaldi-premium-2627:variant:15375323": {
-      "status": "available",
-      "remaining": 1,
-      "last_checked_at": "2026-10-23T16:57:41.937580+09:00",
-      "last_changed_at": "2026-10-23T14:34:37.456713+09:00",
+      "status": "sold_out",
+      "remaining": 0,
+      "last_checked_at": "2026-10-23T20:18:17.249286+09:00",
+      "last_changed_at": "2026-10-23T20:18:17.249286+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
       "last_error": null,
@@ -60,7 +60,7 @@
     "vivaldi-premium-2627:variant:15375324": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-10-23T16:57:41.937580+09:00",
+      "last_checked_at": "2026-10-23T20:18:17.249286+09:00",
       "last_changed_at": "2026-10-23T15:53:56.612885+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
@@ -71,7 +71,7 @@
     "vivaldi-premium-2627:variant:15375325": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-10-23T16:57:41.937580+09:00",
+      "last_checked_at": "2026-10-23T20:18:17.249286+09:00",
       "last_changed_at": "2026-10-19T20:28:44.776680+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
