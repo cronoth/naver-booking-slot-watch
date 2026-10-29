@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-28T07:00:29.366495+09:00",
+  "updated_at": "2026-10-29T10:50:59.227514+09:00",
   "slots": {
     "event-20260829:2026-08-29:10:30": {
       "status": "sold_out",
@@ -38,7 +38,7 @@
     "vivaldi-premium-2627:variant:15375322": {
       "status": "available",
       "remaining": 1,
-      "last_checked_at": "2026-10-28T07:00:29.366495+09:00",
+      "last_checked_at": "2026-10-29T10:50:59.227514+09:00",
       "last_changed_at": "2026-10-26T14:59:12.364032+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
@@ -47,10 +47,10 @@
       "fingerprint": "yanolja/10374449"
     },
     "vivaldi-premium-2627:variant:15375323": {
-      "status": "sold_out",
-      "remaining": 0,
-      "last_checked_at": "2026-10-28T07:00:29.366495+09:00",
-      "last_changed_at": "2026-10-24T13:03:42.677346+09:00",
+      "status": "available",
+      "remaining": 1,
+      "last_checked_at": "2026-10-29T10:50:59.227514+09:00",
+      "last_changed_at": "2026-10-29T10:40:08.196051+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
       "last_error": null,
@@ -60,8 +60,8 @@
     "vivaldi-premium-2627:variant:15375324": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-10-28T07:00:29.366495+09:00",
-      "last_changed_at": "2026-10-23T15:53:56.612885+09:00",
+      "last_checked_at": "2026-10-29T10:50:59.227514+09:00",
+      "last_changed_at": "2026-10-29T10:50:59.227514+09:00",
       "last_notified_remaining": 1,
       "consecutive_errors": 0,
       "last_error": null,
@@ -71,7 +71,7 @@
     "vivaldi-premium-2627:variant:15375325": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-10-28T07:00:29.366495+09:00",
+      "last_checked_at": "2026-10-29T10:50:59.227514+09:00",
       "last_changed_at": "2026-10-19T20:28:44.776680+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
@@ -81,7 +81,7 @@
     }
   },
   "heartbeat": {
-    "last_sent_date": "2026-10-28"
+    "last_sent_date": "2026-10-29"
   },
   "outage_alert_sent": false,
   "recovery_alert_pending": false
