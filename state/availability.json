@@ -1,7 +1,29 @@
 {
   "version": 1,
-  "updated_at": "2026-11-08T07:00:45.864836+09:00",
+  "updated_at": "2026-11-10T15:20:52.220850+09:00",
   "slots": {
+    "deoksugung-20261122:2026-11-22:10:00": {
+      "status": "sold_out",
+      "remaining": 0,
+      "last_checked_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_changed_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_notified_remaining": null,
+      "consecutive_errors": 0,
+      "last_error": null,
+      "error_alert_sent": false,
+      "fingerprint": "12/1108504/5931568"
+    },
+    "deoksugung-20261122:2026-11-22:14:00": {
+      "status": "sold_out",
+      "remaining": 0,
+      "last_checked_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_changed_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_notified_remaining": null,
+      "consecutive_errors": 0,
+      "last_error": null,
+      "error_alert_sent": false,
+      "fingerprint": "12/1108504/5931568"
+    },
     "event-20260829:2026-08-29:10:30": {
       "status": "sold_out",
       "remaining": 0,
@@ -81,7 +103,7 @@
     }
   },
   "heartbeat": {
-    "last_sent_date": "2026-11-08"
+    "last_sent_date": "2026-11-10"
   },
   "outage_alert_sent": false,
   "recovery_alert_pending": false
