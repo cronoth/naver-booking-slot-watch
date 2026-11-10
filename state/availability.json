@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "updated_at": "2026-11-10T15:20:52.220850+09:00",
+  "updated_at": "2026-11-11T07:00:09.474678+09:00",
   "slots": {
     "deoksugung-20261122:2026-11-22:10:00": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_checked_at": "2026-11-11T07:00:09.474678+09:00",
       "last_changed_at": "2026-11-10T15:20:52.220850+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
@@ -16,7 +16,7 @@
     "deoksugung-20261122:2026-11-22:14:00": {
       "status": "sold_out",
       "remaining": 0,
-      "last_checked_at": "2026-11-10T15:20:52.220850+09:00",
+      "last_checked_at": "2026-11-11T07:00:09.474678+09:00",
       "last_changed_at": "2026-11-10T15:20:52.220850+09:00",
       "last_notified_remaining": null,
       "consecutive_errors": 0,
@@ -103,7 +103,7 @@
     }
   },
   "heartbeat": {
-    "last_sent_date": "2026-11-10"
+    "last_sent_date": "2026-11-11"
   },
   "outage_alert_sent": false,
   "recovery_alert_pending": false
